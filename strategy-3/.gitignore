@@ -1,0 +1,29 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Python
+backend/.venv/
+backend/instance/
+backend/logs/
+backend/__pycache__/
+**/__pycache__/
+*.py[cod]
+
+# Env
+.env
+!.env.example
+backend/.env
+!backend/.env.example
+.env.local
+!.env.local.example
+
+# Node
+node_modules/
+.next/
+out/
+tsconfig.tsbuildinfo
+
+# IDE
+.idea/
+.vscode/

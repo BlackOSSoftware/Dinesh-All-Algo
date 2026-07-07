@@ -1,0 +1,36 @@
+import type { Metadata } from "next";
+import { Geist, Geist_Mono } from "next/font/google";
+import { AuthGate } from "@/components/trader/auth-gate";
+import { ThemeProvider } from "@/components/trader/theme-provider";
+import "./globals.css";
+
+const geistSans = Geist({
+  variable: "--font-geist-sans",
+  subsets: ["latin"],
+});
+
+const geistMono = Geist_Mono({
+  variable: "--font-geist-mono",
+  subsets: ["latin"],
+});
+
+export const metadata: Metadata = {
+  title: "Strategy 4 — Indian Algo",
+  description: "Strategy 4 — MCX Crude Oil & Natural Gas trading dashboard",
+};
+
+export default function RootLayout({
+  children,
+}: Readonly<{
+  children: React.ReactNode;
+}>) {
+  return (
+    <html lang="en" className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}>
+      <body className="min-h-full flex flex-col">
+        <ThemeProvider>
+          <AuthGate>{children}</AuthGate>
+        </ThemeProvider>
+      </body>
+    </html>
+  );
+}
