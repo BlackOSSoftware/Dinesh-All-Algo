@@ -256,7 +256,7 @@ export function AppShell({ children }: { children: ReactNode }) {
 
   const nav = [
     { href: "/", label: "Dashboard", icon: LayoutDashboard },
-    { href: "/backtest", label: "Backtest", icon: BarChart3 },
+    // { href: "/backtest", label: "Backtest", icon: BarChart3 },
     { href: "/settings", label: "Settings", icon: SlidersHorizontal },
   ];
 
