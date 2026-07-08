@@ -31,6 +31,39 @@ def backend_root() -> Path:
     return Path(__file__).resolve().parent.parent.parent
 
 
+def reload_angel_tokens_from_env() -> bool:
+    """
+    Re-read ANGEL_JWT_TOKEN / ANGEL_REFRESH_TOKEN from backend/.env into runtime settings.
+    Picks up manual login-script updates without restarting uvicorn.
+    """
+    from app.config import BACKEND_ROOT, settings
+
+    env_path = BACKEND_ROOT / ".env"
+    if not env_path.is_file():
+        return False
+
+    try:
+        from dotenv import dotenv_values
+    except ImportError:
+        return False
+
+    vals = dotenv_values(env_path)
+    jwt = (vals.get("ANGEL_JWT_TOKEN") or "").strip()
+    refresh = (vals.get("ANGEL_REFRESH_TOKEN") or "").strip()
+    changed = False
+    if jwt and jwt != (settings.angel_jwt_token or "").strip():
+        os.environ["ANGEL_JWT_TOKEN"] = jwt
+        object.__setattr__(settings, "angel_jwt_token", jwt)
+        changed = True
+    if refresh and refresh != (settings.angel_refresh_token or "").strip():
+        os.environ["ANGEL_REFRESH_TOKEN"] = refresh
+        object.__setattr__(settings, "angel_refresh_token", refresh)
+        changed = True
+    if changed:
+        LOG.info("Angel tokens reloaded from .env (jwt len=%d)", len(jwt))
+    return changed
+
+
 def _update_env_key(env_path: Path, key: str, value: str) -> None:
     """Insert or replace KEY=value in backend/.env (single line)."""
     line = f"{key}={value}"

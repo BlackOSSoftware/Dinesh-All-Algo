@@ -75,41 +75,6 @@ def _mask_jwt_in_log(text: str) -> str:
     )
 
 
-def _parse_jwt_from_stdout(stdout: str) -> str | None:
-    for line in stdout.splitlines():
-        s = line.strip()
-        if s.upper().startswith("ANGEL_JWT_TOKEN="):
-            val = s.split("=", 1)[1].strip().strip('"').strip("'")
-            if val and not val.startswith("#"):
-                return val
-    return None
-
-
-def _update_env_file_jwt(env_path: Path, new_jwt: str) -> None:
-    """Insert or replace ANGEL_JWT_TOKEN in backend/.env (no other lines changed)."""
-    token_line = f"ANGEL_JWT_TOKEN={new_jwt}"
-    if not env_path.is_file():
-        env_path.write_text(token_line + "\n", encoding="utf-8")
-        return
-    raw = env_path.read_text(encoding="utf-8")
-    pat = re.compile(r"(?m)^ANGEL_JWT_TOKEN\s*=.*$")
-    if pat.search(raw):
-        new_raw = pat.sub(token_line, raw)
-    else:
-        base = raw.rstrip()
-        new_raw = (base + "\n" if base else "") + token_line + "\n"
-    env_path.write_text(new_raw, encoding="utf-8")
-
-
-def _apply_jwt_runtime(new_jwt: str) -> None:
-    """Update os.environ and global settings so quote routes pick up new token without restart."""
-    from app.config import settings
-
-    tok = new_jwt.strip()
-    os.environ["ANGEL_JWT_TOKEN"] = tok
-    object.__setattr__(settings, "angel_jwt_token", tok)
-
-
 def _clear_quote_caches() -> None:
     from app.routers import angel as angel_router
 
@@ -147,7 +112,12 @@ def run_angel_smartapi_login_subprocess(*, reason: str) -> tuple[bool, str, str,
         if ok:
             LOG.info("%s angel_smartapi_login.py completed (exit 0)", SCHED_PREFIX)
         else:
-            LOG.error("%s Login refresh failed: exit_code=%s", SCHED_PREFIX, proc.returncode)
+            LOG.error(
+                "%s Login refresh failed: exit_code=%s stderr=%s",
+                SCHED_PREFIX,
+                proc.returncode,
+                _mask_jwt_in_log((err or "")[-500:]) or "(empty)",
+            )
         return ok, out, err, proc.returncode
     except subprocess.TimeoutExpired as e:
         LOG.error("%s Login refresh failed: timeout after 120s", SCHED_PREFIX)
@@ -157,38 +127,36 @@ def run_angel_smartapi_login_subprocess(*, reason: str) -> tuple[bool, str, str,
         return False, "", str(e), -1
 
 
-def apply_jwt_from_script_output(stdout: str) -> bool:
-    """Parse JWT (and optional refresh token) from script stdout, write .env, update runtime, clear caches."""
-    from app.services.angel_jwt_refresh import parse_angel_refresh_from_login_stdout, save_refresh_token_to_env_and_runtime
+def apply_jwt_from_env_file() -> bool:
+    """Reload JWT/refresh from backend/.env after the login script updates it."""
+    from app.config import settings
+    from app.services.angel_jwt_refresh import reload_angel_tokens_from_env
 
-    jwt = _parse_jwt_from_stdout(stdout)
+    changed = reload_angel_tokens_from_env()
+    jwt = (settings.angel_jwt_token or "").strip()
+    refresh = (settings.angel_refresh_token or "").strip()
     if not jwt:
-        LOG.error("%s Login refresh failed: could not parse ANGEL_JWT_TOKEN from script stdout", SCHED_PREFIX)
+        LOG.error("%s Login refresh failed: ANGEL_JWT_TOKEN still empty after script success", SCHED_PREFIX)
         return False
-    env_path = backend_root() / ".env"
-    try:
-        _update_env_file_jwt(env_path, jwt)
-        _apply_jwt_runtime(jwt)
-        rt = parse_angel_refresh_from_login_stdout(stdout)
-        if rt:
-            save_refresh_token_to_env_and_runtime(rt)
-        _clear_quote_caches()
-        LOG.info("%s Login refresh successful", SCHED_PREFIX)
-        LOG.info("%s ANGEL_JWT_TOKEN written to .env; in-memory JWT length=%d", SCHED_PREFIX, len(jwt))
-        return True
-    except OSError as e:
-        LOG.error("%s Login refresh failed: could not write .env: %s", SCHED_PREFIX, e)
-        return False
+    _clear_quote_caches()
+    LOG.info(
+        "%s Login refresh successful (jwt len=%d, refresh set=%s, changed=%s)",
+        SCHED_PREFIX,
+        len(jwt),
+        bool(refresh),
+        changed,
+    )
+    return True
 
 
 def _sync_login_job(reason: str, allow_retry: bool) -> None:
-    ok, stdout, _stderr, _rc = run_angel_smartapi_login_subprocess(reason=reason)
+    ok, _stdout, _stderr, _rc = run_angel_smartapi_login_subprocess(reason=reason)
     if not ok:
         if allow_retry:
             LOG.info("%s Scheduling single retry in 5 minutes...", SCHED_PREFIX)
             schedule_retry_once()
         return
-    if not apply_jwt_from_script_output(stdout):
+    if not apply_jwt_from_env_file():
         if allow_retry:
             LOG.info("%s Scheduling single retry in 5 minutes (apply failed)...", SCHED_PREFIX)
             schedule_retry_once()
@@ -301,15 +269,15 @@ def trigger_manual_angel_login() -> dict[str, Any]:
     ok, errs = verify_angel_login_paths()
     if not ok:
         return {"ok": False, "error": "; ".join(errs)}
-    ok_run, stdout, stderr, rc = run_angel_smartapi_login_subprocess(reason="manual")
+    ok_run, _stdout, stderr, rc = run_angel_smartapi_login_subprocess(reason="manual")
     if not ok_run:
         return {
             "ok": False,
             "error": f"script exit {rc}",
             "stderr_tail": (stderr or "")[-2000:],
         }
-    if not apply_jwt_from_script_output(stdout):
-        return {"ok": False, "error": "could not parse or apply ANGEL_JWT_TOKEN"}
+    if not apply_jwt_from_env_file():
+        return {"ok": False, "error": "script ran but ANGEL_JWT_TOKEN was not reloaded from backend/.env"}
     return {"ok": True, "message": "Angel session refreshed"}
 
 
