@@ -4,6 +4,7 @@ Set-Location $root
 
 $FrontendUrl = "http://localhost:3003"
 $ChromeProfileName = "indian-algo-strategy-4"
+$ChromeProfileDir = Join-Path $env:TEMP $ChromeProfileName
 
 function Start-ManagedProcess {
     param(
@@ -43,10 +44,7 @@ function Get-ChromePath {
 }
 
 function Start-ChromeApp {
-    param(
-        [Parameter(Mandatory=$true)][string]$Url,
-        [Parameter(Mandatory=$true)][string]$ProfileName
-    )
+    param([Parameter(Mandatory=$true)][string]$Url)
 
     $chrome = Get-ChromePath
     if (-not $chrome) {
@@ -54,12 +52,18 @@ function Start-ChromeApp {
         return $null
     }
 
-    $profileDir = Join-Path $env:TEMP $ProfileName
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
     $psi.FileName = $chrome
-    $psi.Arguments = "--new-window `"$Url`" --user-data-dir=`"$profileDir`" --no-first-run --no-default-browser-check"
+    $psi.Arguments = "--new-window `"$Url`" --user-data-dir=`"$ChromeProfileDir`" --no-first-run --no-default-browser-check"
     $psi.UseShellExecute = $false
     return [System.Diagnostics.Process]::Start($psi)
+}
+
+function Stop-ChromeProfile {
+    $escaped = [Regex]::Escape($ChromeProfileDir)
+    Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -match $escaped } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 }
 
 $children = @()
@@ -96,9 +100,9 @@ try {
     $children += Start-ManagedProcess -Name "Frontend" -Command "npm run start"
     Start-Sleep -Seconds 4
 
-    $chrome = Start-ChromeApp -Url $FrontendUrl -ProfileName $ChromeProfileName
+    $chrome = Start-ChromeApp -Url $FrontendUrl
     if ($null -ne $chrome) {
-        $children += [pscustomobject]@{ Name = "Chrome"; Process = $chrome }
+        $children += [pscustomobject]@{ Name = "ChromeLauncher"; Process = $chrome }
         Write-Host "Opened Chrome window: $FrontendUrl" -ForegroundColor Green
     }
 
@@ -107,6 +111,7 @@ try {
 
     while ($true) {
         foreach ($child in $children) {
+            if ($child.Name -eq "ChromeLauncher") { continue }
             if ($child.Process.HasExited) {
                 throw "$($child.Name) exited with code $($child.Process.ExitCode)."
             }
@@ -128,5 +133,6 @@ finally {
     foreach ($child in $children) {
         Stop-ProcessTree -Process $child.Process
     }
+    Stop-ChromeProfile
     Write-Host "Stopped." -ForegroundColor Green
 }
