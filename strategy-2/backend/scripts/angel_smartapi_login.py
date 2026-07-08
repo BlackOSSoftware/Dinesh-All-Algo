@@ -10,12 +10,13 @@ Uses env (see backend/.env.example):
 
 Run (PowerShell):
 
-  cd "d:\\BlackOS\\dinesh algo\\backend"
+  cd strategy-N\\backend
   .\\.venv\\Scripts\\Activate.ps1
   pip install -r requirements.txt
   python scripts\\angel_smartapi_login.py
 
-Copy printed `ANGEL_JWT_TOKEN` into backend/.env for GET /angel/live-quote.
+On success, writes ANGEL_JWT_TOKEN / ANGEL_REFRESH_TOKEN (and optional feed token)
+into strategy-1..4 backend/.env automatically.
 """
 
 from __future__ import annotations
@@ -29,6 +30,10 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = BACKEND_ROOT.parent.parent
+STRATEGY_ENV_PATHS = [
+    REPO_ROOT / f"strategy-{n}" / "backend" / ".env" for n in (1, 2, 3, 4)
+]
 
 
 def _normalize_totp_secret(raw: str) -> str:
@@ -72,6 +77,36 @@ def _normalize_totp_secret(raw: str) -> str:
         )
 
     return s
+
+
+def _set_env_key(text: str, key: str, value: str) -> str:
+    """Replace or append KEY=value in a .env file body."""
+    line = f"{key}={value}"
+    pattern = re.compile(rf"(?m)^\s*{re.escape(key)}\s*=.*$")
+    if pattern.search(text):
+        return pattern.sub(line, text)
+    body = text.rstrip("\n")
+    if body:
+        return body + "\n" + line + "\n"
+    return line + "\n"
+
+
+def _write_tokens_to_env_files(jwt_token: str, refresh_token: str, feed_token: str = "") -> list[Path]:
+    updated: list[Path] = []
+    for path in STRATEGY_ENV_PATHS:
+        if not path.is_file():
+            print(f"skip missing: {path}")
+            continue
+        raw = path.read_text(encoding="utf-8")
+        next_text = _set_env_key(raw, "ANGEL_JWT_TOKEN", jwt_token)
+        if refresh_token:
+            next_text = _set_env_key(next_text, "ANGEL_REFRESH_TOKEN", refresh_token)
+        if feed_token:
+            next_text = _set_env_key(next_text, "ANGEL_FEED_TOKEN", feed_token)
+        if next_text != raw:
+            path.write_text(next_text, encoding="utf-8", newline="\n")
+        updated.append(path)
+    return updated
 
 
 def main() -> int:
@@ -146,14 +181,17 @@ def main() -> int:
     refresh = data.get("refreshToken") or ""
     feed = data.get("feedToken") or ""
 
-    print("--- OK: paste into backend/.env ---")
-    print(f"ANGEL_JWT_TOKEN={jwt_raw}")
-    print(f"ANGEL_REFRESH_TOKEN={refresh}")
+    if not jwt_raw:
+        print("Login OK but jwtToken missing:", result, file=sys.stderr)
+        return 1
+
+    updated = _write_tokens_to_env_files(jwt_raw, refresh, feed)
+    print("--- OK: tokens written to strategy .env files ---")
+    for path in updated:
+        print(f"updated: {path}")
     print()
-    print("# optional (websocket feed); quote uses ANGEL_JWT_TOKEN only")
-    print(f"# ANGEL_FEED_TOKEN={feed}")
-    print()
-    print("jwtToken length:", len(jwt_raw))
+    print(f"ANGEL_JWT_TOKEN length: {len(jwt_raw)}")
+    print("Restart strategy workers after refresh so they reload .env.")
     return 0
 
 

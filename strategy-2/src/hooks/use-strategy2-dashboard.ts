@@ -31,6 +31,8 @@ function stripTradeData(snap: DashboardSnapshot): DashboardSnapshot {
     position_lots: 0,
     realized_pnl: 0,
     unrealized_pnl: 0,
+    last_live_error: null,
+    last_live_error_at: null,
   };
 }
 

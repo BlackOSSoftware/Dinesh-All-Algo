@@ -372,14 +372,15 @@ function formatLogTimestamp(iso: string): string {
   try {
     const d = parseDbUtcIso(iso);
     if (Number.isNaN(d.getTime())) return iso.slice(0, 19);
-    return d.toLocaleString('en-IN', {
+    return d.toLocaleString('en-GB', {
       timeZone: 'Asia/Kolkata',
-      hour12: false,
       day: '2-digit',
       month: '2-digit',
+      year: 'numeric',
       hour: '2-digit',
       minute: '2-digit',
       second: '2-digit',
+      hour12: false,
     });
   } catch {
     return iso;
@@ -392,11 +393,11 @@ function formatTradeTimeIST(iso: string | null | undefined): string {
   try {
     const d = parseDbUtcIso(iso);
     if (Number.isNaN(d.getTime())) return String(iso).replace('T', ' ').slice(0, 23);
-    const s = d.toLocaleString('en-IN', {
+    // Match trading-log style: DD/MM/YYYY HH:mm:ss IST (en-GB day-first, 24h).
+    const s = d.toLocaleString('en-GB', {
       timeZone: 'Asia/Kolkata',
-      weekday: 'short',
       day: '2-digit',
-      month: 'short',
+      month: '2-digit',
       year: 'numeric',
       hour: '2-digit',
       minute: '2-digit',

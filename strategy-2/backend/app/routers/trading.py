@@ -250,6 +250,15 @@ def get_dashboard(user: User = Depends(get_current_user), db: Session = Depends(
         for r in log_rows
     ]
 
+    last_live_error: str | None = None
+    last_live_error_at: str | None = None
+    for r in log_rows:
+        action = str(r.action or "").upper()
+        if action in ("ERROR", "LIVE_SKIPPED", "ORDER_REJECTED") or action.startswith("LIVE_") and "FAIL" in action:
+            last_live_error = str(r.message or action)
+            last_live_error_at = _iso(r.created_at)
+            break
+
     return DashboardOut(
         config=cfg,
         algo_running=bool(row.algo_running),
@@ -265,6 +274,8 @@ def get_dashboard(user: User = Depends(get_current_user), db: Session = Depends(
         active_trades=active_trades,
         completed_trades=completed_trades,
         logs=logs,
+        last_live_error=last_live_error,
+        last_live_error_at=last_live_error_at,
     )
 
 

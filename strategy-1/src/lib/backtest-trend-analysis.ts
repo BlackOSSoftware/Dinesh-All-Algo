@@ -106,6 +106,14 @@ export type CycleEntryLeg = {
   lots: number;
 };
 
+export type CycleTp1Exit = {
+  label: string;
+  time: string;
+  price: number;
+  lots: number;
+  pnl: number;
+};
+
 export type CycleTradeRecord = {
   uid: string;
   order: number;
@@ -117,6 +125,8 @@ export type CycleTradeRecord = {
   triggerPrice: number | null;
   initialEntry: CycleEntryLeg | null;
   averaging: CycleEntryLeg[];
+  firstEntryTp1: CycleTp1Exit | null;
+  avgTp1Exits: CycleTp1Exit[];
   tp1Price: number | null;
   tp1ExitLots: number;
   tp1Time: string | null;
@@ -124,6 +134,7 @@ export type CycleTradeRecord = {
   tp2AdaptiveLow: number | null;
   tp2ExitPrice: number | null;
   tp2Time: string | null;
+  tp2Pnl: number | null;
   stopLoss: number | null;
   reentryPrice: number | null;
   reentryStrike: string | null;
@@ -433,6 +444,19 @@ export function buildTradeRecords(trades: Trade[], log: Record<string, unknown>[
   }));
 }
 
+function mapCycleTp1Exit(raw: Record<string, unknown> | null | undefined): CycleTp1Exit | null {
+  if (!raw) return null;
+  const price = raw.price != null ? Number(raw.price) : raw.exit_price != null ? Number(raw.exit_price) : null;
+  if (price == null) return null;
+  return {
+    label: String(raw.label ?? "TP1"),
+    time: String(raw.time ?? ""),
+    price,
+    lots: Number(raw.lots ?? raw.exit_lots ?? 0),
+    pnl: Number(raw.pnl ?? raw.trade_pnl ?? 0),
+  };
+}
+
 function mapCycleLeg(raw: Record<string, unknown> | null | undefined): CycleEntryLeg | null {
   if (!raw) return null;
   return {
@@ -463,6 +487,15 @@ export function mapCycleTradeRecord(raw: Record<string, unknown>, index: number)
       (raw.initial_entry ?? raw.initialEntry) as Record<string, unknown> | undefined,
     ),
     averaging,
+    firstEntryTp1: mapCycleTp1Exit(
+      (raw.first_entry_tp1 ?? raw.firstEntryTp1) as Record<string, unknown> | undefined,
+    ),
+    avgTp1Exits: (Array.isArray(raw.avg_tp1_exits ?? raw.avgTp1Exits)
+      ? ((raw.avg_tp1_exits ?? raw.avgTp1Exits) as unknown[])
+      : []
+    )
+      .map((item) => mapCycleTp1Exit(item as Record<string, unknown>))
+      .filter((x): x is CycleTp1Exit => x != null),
     tp1Price: raw.tp1_price != null ? Number(raw.tp1_price) : raw.tp1Price != null ? Number(raw.tp1Price) : null,
     tp1ExitLots: Number(raw.tp1_exit_lots ?? raw.tp1ExitLots ?? 0),
     tp1Time: raw.tp1_time != null ? String(raw.tp1_time) : raw.tp1Time != null ? String(raw.tp1Time) : null,
@@ -472,6 +505,7 @@ export function mapCycleTradeRecord(raw: Record<string, unknown>, index: number)
       raw.tp2_adaptive_low != null ? Number(raw.tp2_adaptive_low) : raw.tp2AdaptiveLow != null ? Number(raw.tp2AdaptiveLow) : null,
     tp2ExitPrice: raw.tp2_exit_price != null ? Number(raw.tp2_exit_price) : raw.tp2ExitPrice != null ? Number(raw.tp2ExitPrice) : null,
     tp2Time: raw.tp2_time != null ? String(raw.tp2_time) : raw.tp2Time != null ? String(raw.tp2Time) : null,
+    tp2Pnl: raw.tp2_pnl != null ? Number(raw.tp2_pnl) : raw.tp2Pnl != null ? Number(raw.tp2Pnl) : null,
     stopLoss: raw.stop_loss != null ? Number(raw.stop_loss) : raw.stopLoss != null ? Number(raw.stopLoss) : null,
     reentryPrice: raw.reentry_price != null ? Number(raw.reentry_price) : raw.reentryPrice != null ? Number(raw.reentryPrice) : null,
     reentryStrike: raw.reentry_strike != null ? String(raw.reentry_strike) : raw.reentryStrike != null ? String(raw.reentryStrike) : null,
@@ -510,8 +544,11 @@ export function buildCycleTradeRecordsFromLog(log: Record<string, unknown>[]): C
     let tp1ExitLots = 0;
     let tp1Price: number | null = null;
     let tp1Time: string | null = null;
+    let firstEntryTp1: CycleTp1Exit | null = null;
+    const avgTp1Exits: CycleTp1Exit[] = [];
     let tp2ExitPrice: number | null = null;
     let tp2Time: string | null = null;
+    let tp2Pnl: number | null = null;
     let tp2AdaptiveHigh: number | null = null;
     let tp2AdaptiveLow: number | null = null;
     let exitReason = "";
@@ -552,14 +589,31 @@ export function buildCycleTradeRecordsFromLog(log: Record<string, unknown>[]): C
           entryLotsSum += leg.lots;
         }
       } else if (action === "TP1_PARTIAL") {
-        tp1Price = row.exit_price != null ? Number(row.exit_price) : row.tp1 != null ? Number(row.tp1) : tp1Price;
-        tp1ExitLots += Number(row.exit_lots ?? row.lots ?? 0);
+        const reason = String(row.exit_reason ?? "");
+        const exitPrice = row.exit_price != null ? Number(row.exit_price) : row.tp1 != null ? Number(row.tp1) : null;
+        const exitLots = Number(row.exit_lots ?? row.lots ?? 0);
+        const exitPnl = Number(row.trade_pnl ?? 0);
+        const exit: CycleTp1Exit = {
+          label: reason === "TP1_AVG" ? "Avg TP1" : "First TP1",
+          time: String(row.time ?? ""),
+          price: exitPrice ?? 0,
+          lots: exitLots,
+          pnl: exitPnl,
+        };
+        if (reason === "TP1_AVG") {
+          avgTp1Exits.push(exit);
+        } else {
+          firstEntryTp1 = exit;
+        }
+        tp1Price = exitPrice ?? tp1Price;
+        tp1ExitLots += exitLots;
         tp1Time = String(row.time ?? "");
         if (stopLoss == null && row.stop_loss != null) stopLoss = Number(row.stop_loss);
       } else if (action === "EXIT") {
         exitReason = String(row.exit_reason ?? "");
         tp2ExitPrice = row.exit_price != null ? Number(row.exit_price) : null;
         tp2Time = String(row.time ?? "");
+        tp2Pnl = Number(row.trade_pnl ?? 0) || null;
         if (row.adaptive_high != null) tp2AdaptiveHigh = Number(row.adaptive_high);
         if (row.adaptive_low != null) tp2AdaptiveLow = Number(row.adaptive_low);
         if (stopLoss == null && row.stop_loss != null) stopLoss = Number(row.stop_loss);
@@ -581,6 +635,8 @@ export function buildCycleTradeRecordsFromLog(log: Record<string, unknown>[]): C
       triggerPrice,
       initialEntry,
       averaging,
+      firstEntryTp1,
+      avgTp1Exits,
       tp1Price,
       tp1ExitLots,
       tp1Time,
@@ -588,6 +644,7 @@ export function buildCycleTradeRecordsFromLog(log: Record<string, unknown>[]): C
       tp2AdaptiveLow,
       tp2ExitPrice,
       tp2Time,
+      tp2Pnl,
       stopLoss,
       reentryPrice,
       reentryStrike,
@@ -605,11 +662,11 @@ export function buildCycleTradeRecords(
   log: Record<string, unknown>[],
   apiRecords?: Record<string, unknown>[],
 ): CycleTradeRecord[] {
-  if (apiRecords?.length) {
-    return apiRecords.map((r, i) => mapCycleTradeRecord(r, i));
-  }
   if (log.length > 0) {
     return buildCycleTradeRecordsFromLog(log);
+  }
+  if (apiRecords?.length) {
+    return apiRecords.map((r, i) => mapCycleTradeRecord(r, i));
   }
   return [];
 }
@@ -840,17 +897,24 @@ export function cycleRecordsToExportRows(records: CycleTradeRecord[]): (string |
     fmtDate(c.date),
     c.cycleId,
     c.side,
-    c.cycleKind,
+    c.cycleKind === "INITIAL" ? "Initial Trade" : "Re-entry Trade",
     c.basePrice ?? "",
     c.triggerPrice ?? "",
-    c.initialEntry?.indexPrice ?? "",
-    c.initialEntry?.strike ?? "",
-    c.initialEntry?.lots ?? "",
-    c.averaging.map((a) => `${a.label}:${a.indexPrice}@${a.strike}x${a.lots}`).join(" | "),
-    c.tp1Price ?? "",
-    c.tp1ExitLots || "",
-    c.tp2AdaptiveHigh ?? c.tp2AdaptiveLow ?? "",
-    c.tp2ExitPrice ?? "",
+    c.initialEntry
+      ? `${c.initialEntry.time} @ ${fmtPx(c.initialEntry.indexPrice)} · ${c.initialEntry.strike} · ${c.initialEntry.lots} lot`
+      : "",
+    c.averaging
+      .map((a, index) => `AVG${index + 1} ${a.time} @ ${fmtPx(a.indexPrice)} · ${a.strike} · ${a.lots} lot`)
+      .join(" | "),
+    c.firstEntryTp1
+      ? `${c.firstEntryTp1.time} @ ${fmtPx(c.firstEntryTp1.price)} · ${c.firstEntryTp1.lots} lot · +${c.firstEntryTp1.pnl}`
+      : "",
+    c.avgTp1Exits
+      .map((avg) => `${avg.time} @ ${fmtPx(avg.price)} · ${avg.lots} lot · +${avg.pnl}`)
+      .join(" | "),
+    c.tp2ExitPrice != null
+      ? `${c.tp2Time ?? ""} @ ${fmtPx(c.tp2ExitPrice)}${c.tp2Pnl != null ? ` · +${c.tp2Pnl}` : ""}`
+      : "",
     c.stopLoss ?? "",
     c.exitReason,
     c.totalLotsUsed,

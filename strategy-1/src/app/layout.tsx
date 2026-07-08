@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
+import { AppShell } from "@/components/trader/app-shell";
 import { AuthGate } from "@/components/trader/auth-gate";
 import { ThemeProvider } from "@/components/trader/theme-provider";
 import "./globals.css";
@@ -29,7 +30,7 @@ export default function RootLayout({
       <body className="min-h-full flex flex-col">
         <ThemeProvider>
           <AuthGate>
-            {children}
+            <AppShell>{children}</AppShell>
           </AuthGate>
         </ThemeProvider>
       </body>

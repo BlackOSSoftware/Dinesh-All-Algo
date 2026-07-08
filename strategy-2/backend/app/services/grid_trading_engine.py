@@ -17,10 +17,8 @@ from app.models import StrategySettings, TradePosition, User
 from app.services import angel_orders
 from app.services import trading_repository as tr
 from app.services.grid_logic import (
-    grid_level_tolerance,
     grid_order_price,
     load_runtime,
-    ltp_matches_grid_level,
     parse_strategy_config,
     process_price_tick,
     seed_runtime_market_price,
@@ -178,7 +176,10 @@ def _execute_live_order(
             leg=level_id,
             action="ERROR",
             symbol=instrument.tradingsymbol,
-            message=f"Live order failed: {exc}"[:900],
+            message=(
+                f"Live order rejected by Angel/exchange for {instrument.tradingsymbol}: {exc}. "
+                "No order id generated, so nothing appears in Angel order book or Active Trades."
+            )[:900],
         )
         return None
 
@@ -493,8 +494,6 @@ def process_user_tick(db, user_id: int) -> None:
     kept_actions: list[dict[str, Any]] = []
     live_failed = False
 
-    grid_gap = parsed["grid_gap"]
-
     for act in actions:
         lots = abs(int(act.get("lotsDelta") or 0))
         level_px = float(act.get("levelPrice") or 0)
@@ -505,21 +504,6 @@ def process_user_tick(db, user_id: int) -> None:
         log_msg = f"{log_msg} | Grid {fill_px:.2f} · LTP {price:.2f}"[:900]
 
         if mode == "LIVE" and lots > 0:
-            if level_px <= 0 or not ltp_matches_grid_level(price, level_px, grid_gap):
-                tr.append_trading_log(
-                    db,
-                    user_id=user_id,
-                    mode=mode,
-                    leg=str(act.get("level") or "-"),
-                    action="LIVE_SKIPPED",
-                    symbol=instrument.tradingsymbol,
-                    message=(
-                        f"LTP {price:.2f} not at grid {level_px:.2f} "
-                        f"(tol ±{grid_level_tolerance(grid_gap):.2f}) — no broker order"
-                    )[:900],
-                )
-                live_failed = True
-                break
             if (
                 _execute_live_order(
                     db,

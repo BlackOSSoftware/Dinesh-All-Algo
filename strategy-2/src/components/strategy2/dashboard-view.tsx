@@ -123,7 +123,14 @@ function DataTable({
               rows.map((row, i) => (
                 <tr key={i} className="border-b border-[var(--border-subtle)] last:border-0">
                   {row.map((cell, j) => (
-                    <td key={j} className="px-3 py-2 text-[var(--text-primary)]">
+                    <td
+                      key={j}
+                      className={cn(
+                        "px-3 py-2 text-[var(--text-primary)]",
+                        j === row.length - 1 && headers[j] === "Message" && "max-w-[520px] whitespace-normal break-words",
+                      )}
+                      title={typeof cell === "string" ? cell : undefined}
+                    >
                       {cell}
                     </td>
                   ))}
@@ -365,7 +372,7 @@ export function Strategy2DashboardView() {
           l.leg,
           l.quantity ?? "—",
           l.pnl != null ? fmtPnl(l.pnl) : "—",
-          (l.message ?? "").slice(0, 80),
+          l.message ?? "",
         ])}
         empty={serverOnline ? "No logs yet" : "Server offline"}
         action={

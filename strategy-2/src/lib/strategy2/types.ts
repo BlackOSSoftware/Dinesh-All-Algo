@@ -160,6 +160,8 @@ export type DashboardSnapshot = {
   active_trades: ActiveTrade[];
   completed_trades: CompletedTrade[];
   logs: TradingLogRow[];
+  last_live_error?: string | null;
+  last_live_error_at?: string | null;
 };
 
 export const EMPTY_DASHBOARD: DashboardSnapshot = {
@@ -177,6 +179,8 @@ export const EMPTY_DASHBOARD: DashboardSnapshot = {
   active_trades: [],
   completed_trades: [],
   logs: [],
+  last_live_error: null,
+  last_live_error_at: null,
 };
 
 export const EMPTY_CONFIG: Strategy2Config = {

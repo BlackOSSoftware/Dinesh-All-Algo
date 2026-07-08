@@ -146,6 +146,8 @@ class DashboardOut(BaseModel):
     active_trades: list[ActivePositionOut]
     completed_trades: list[CompletedPositionOut]
     logs: list[TradingLogOut]
+    last_live_error: str | None = None
+    last_live_error_at: str | None = None
 
 
 class GridBacktestRunIn(BaseModel):
