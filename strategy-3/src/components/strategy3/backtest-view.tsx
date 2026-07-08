@@ -251,12 +251,12 @@ export function Strategy3BacktestView() {
         <CardTitle title="Strategy Settings" subtitle="Same parameters as Strategy Settings page" />
         <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           <FloatingField id="bt-start" label="First Window Start" type="time" value={cfg.startTime} onChange={(v) => setCfg((c) => ({ ...c, startTime: v }))} />
-          <FloatingField id="bt-wc" label="Number of Windows" type="number" value={String(cfg.windowCount)} onChange={(v) => setCfg((c) => ({ ...c, windowCount: Math.max(1, Math.min(5, parseNum(v) || 1)) }))} />
-          <FloatingField id="bt-gap" label="Gap Between Windows (min)" type="number" value={String(cfg.windowGapMinutes)} onChange={(v) => setCfg((c) => ({ ...c, windowGapMinutes: Math.max(5, parseNum(v) || 10) }))} />
+          <FloatingField id="bt-wc" label="Number of Windows" type="number" value={numInput(cfg.windowCount)} onChange={(v) => setCfg((c) => ({ ...c, windowCount: parseNum(v) }))} />
+          <FloatingField id="bt-gap" label="Gap Between Windows (min)" type="number" value={numInput(cfg.windowGapMinutes)} onChange={(v) => setCfg((c) => ({ ...c, windowGapMinutes: parseNum(v) }))} />
           <FloatingField id="bt-tf" label="Candle Timeframe (min)" type="number" value="10" onChange={() => {}} disabled />
           <FloatingField id="bt-target" label="Target (%)" type="number" value={numInput(cfg.targetPercent)} onChange={(v) => setCfg((c) => ({ ...c, targetPercent: parseNum(v) }))} />
           <FloatingField id="bt-sl" label="Stop Loss (%)" type="number" value={numInput(cfg.stopLossPercent)} onChange={(v) => setCfg((c) => ({ ...c, stopLossPercent: parseNum(v) }))} />
-          <FloatingField id="bt-qty" label="Quantity (lots)" type="number" value={numInput(cfg.quantity)} onChange={(v) => setCfg((c) => ({ ...c, quantity: Math.max(1, parseNum(v) || 1) }))} />
+          <FloatingField id="bt-qty" label="Quantity (lots)" type="number" value={numInput(cfg.quantity)} onChange={(v) => setCfg((c) => ({ ...c, quantity: parseNum(v) }))} />
           <label className="block space-y-2">
             <span className="text-sm font-medium text-[var(--text-secondary)]">Product Type</span>
             <select className="w-full rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-muted)] px-4 py-3 text-sm" value={cfg.productType} onChange={(e) => setCfg((c) => ({ ...c, productType: e.target.value as ProductType }))}>

@@ -23,7 +23,7 @@ import {
   Repeat,
   Compass,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { cn } from "@/components/ui";
 import { normalizeEntryLots } from "@/lib/backtest-trend-analysis";
 
@@ -154,6 +154,13 @@ export function NumStepper({
   max?: number;
   step?: number;
 }) {
+  const [focused, setFocused] = useState(false);
+  const [draft, setDraft] = useState(String(value));
+
+  useEffect(() => {
+    if (!focused) setDraft(String(value));
+  }, [value, focused]);
+
   const dec = () => onChange(Math.max(min, value - step));
   const inc = () => onChange(Math.min(max, value + step));
   return (
@@ -164,9 +171,16 @@ export function NumStepper({
       <input
         type="number"
         className="min-w-0 flex-1 border-x border-[var(--border-subtle)] bg-transparent text-center font-mono text-sm text-[var(--text-primary)] outline-none"
-        value={value}
-        onChange={(e) => {
-          const n = parseInt(e.target.value, 10);
+        value={focused ? draft : String(value)}
+        onFocus={() => {
+          setFocused(true);
+          setDraft(String(value));
+        }}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={() => {
+          setFocused(false);
+          if (draft === "") return;
+          const n = parseInt(draft, 10);
           if (Number.isFinite(n)) onChange(Math.min(max, Math.max(min, n)));
         }}
       />

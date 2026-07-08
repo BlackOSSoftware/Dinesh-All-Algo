@@ -18,8 +18,13 @@ import { cn } from "@/components/ui";
 
 const MARKETS: { value: MarketKey; label: string }[] = [
   { value: "CRUDE_OIL", label: "Crude Oil" },
+  { value: "CRUDE_OIL_MINI", label: "Crude Oil Mini" },
+  { value: "CRUDE_OIL_MEGA", label: "Crude Oil Mega" },
   { value: "NATURAL_GAS", label: "Natural Gas" },
+  { value: "NATURAL_GAS_MINI", label: "Natural Gas Mini" },
+  { value: "NATURAL_GAS_MEGA", label: "Natural Gas Mega" },
   { value: "SILVER_MICRO", label: "Silver Micro" },
+  { value: "SILVER_MINI", label: "Silver Mini" },
 ];
 
 const MAX_BACKTEST_DAYS = 31;

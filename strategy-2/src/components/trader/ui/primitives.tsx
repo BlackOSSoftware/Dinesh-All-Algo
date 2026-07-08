@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import { cn } from "@/components/ui";
 
@@ -204,19 +205,38 @@ export function FloatingField({
   step?: string | number;
   disabled?: boolean;
 }) {
-  const filled = value.length > 0;
+  const [focused, setFocused] = useState(false);
+  const [draft, setDraft] = useState(value);
+
+  useEffect(() => {
+    if (!focused) setDraft(value);
+  }, [value, focused]);
+
+  const display = focused ? draft : value;
+  const filled = display.length > 0;
   return (
     <div className="relative">
       <input
         id={id}
         type={type}
-        value={value}
+        value={display}
         disabled={disabled}
         placeholder={placeholder ?? " "}
         min={min}
         max={max}
         step={step}
-        onChange={(e) => onChange(e.target.value)}
+        onFocus={() => {
+          setFocused(true);
+          setDraft(value);
+        }}
+        onChange={(e) => {
+          setDraft(e.target.value);
+          onChange(e.target.value);
+        }}
+        onBlur={() => {
+          setFocused(false);
+          onChange(draft);
+        }}
         className={cn(
           "peer w-full rounded-[var(--radius-input)] border border-[var(--border-subtle)] bg-[var(--surface-muted)] px-4 pb-3 pt-6 text-sm font-medium text-[var(--text-primary)] outline-none transition",
           "placeholder:text-transparent focus:border-[var(--accent)] focus:bg-[var(--surface-elevated)] focus:ring-4 focus:ring-[var(--accent-soft)]",

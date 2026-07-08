@@ -167,14 +167,19 @@ def _fetch_batch_quotes(
     *,
     _retry_depth: int = 0,
 ) -> dict[str, tuple[float, str, str]]:
-    """Fetch all configured MCX instruments in one Angel quote request. Returns token -> (price, price_type, source)."""
+    """Fetch all configured MCX instruments in one Angel quote request. Returns key -> (price, price_type, source)."""
     exchange_tokens: dict[str, list[str]] = {}
-    token_to_key: dict[str, str] = {}
+    token_to_keys: dict[str, list[str]] = {}
+    seen_tokens: set[str] = set()
     for inst in instruments:
         if not inst.configured:
             continue
-        exchange_tokens.setdefault(inst.exchange, []).append(inst.token)
-        token_to_key[inst.token] = inst.key
+        keys = token_to_keys.setdefault(inst.token, [])
+        if inst.key not in keys:
+            keys.append(inst.key)
+        if inst.token not in seen_tokens:
+            exchange_tokens.setdefault(inst.exchange, []).append(inst.token)
+            seen_tokens.add(inst.token)
 
     if not exchange_tokens:
         return {}
@@ -203,12 +208,13 @@ def _fetch_batch_quotes(
     out: dict[str, tuple[float, str, str]] = {}
     for row in rows:
         token = _row_token(row)
-        key = token_to_key.get(token)
-        if not key:
+        keys = token_to_keys.get(token) or []
+        if not keys:
             continue
         ltp, _, price_type = _parse_fetched_row(row)
         if ltp is not None:
-            out[key] = (ltp, price_type, "live")
+            for key in keys:
+                out[key] = (ltp, price_type, "live")
 
     if not out and rows:
         for inst in instruments:

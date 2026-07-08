@@ -22,9 +22,14 @@ _CACHE_PATH = BACKEND_ROOT / "instance" / "mcx_tokens_cache.json"
 _CACHE_TTL_SEC = 6 * 3600  # 6 hours
 
 _MCX_LOOKUP: dict[str, dict[str, str]] = {
-    "CRUDE_OIL": {"search": "CRUDEOIL", "symbol": "CRUDEOIL"},
-    "NATURAL_GAS": {"search": "NATURALGAS", "symbol": "NATURALGAS"},
-    "SILVER_MICRO": {"search": "SILVERMIC", "symbol": "SILVERMIC"},
+    "CRUDE_OIL": {"search": "CRUDEOIL", "symbol": "CRUDEOIL", "variant": "standard"},
+    "CRUDE_OIL_MINI": {"search": "CRUDEOILM", "symbol": "CRUDEOILM", "variant": "mini"},
+    "CRUDE_OIL_MEGA": {"search": "CRUDEOIL", "symbol": "CRUDEOIL", "variant": "standard"},
+    "NATURAL_GAS": {"search": "NATURALGAS", "symbol": "NATURALGAS", "variant": "standard"},
+    "NATURAL_GAS_MINI": {"search": "NATGASMINI", "symbol": "NATGASMINI", "variant": "mini"},
+    "NATURAL_GAS_MEGA": {"search": "NATURALGAS", "symbol": "NATURALGAS", "variant": "standard"},
+    "SILVER_MICRO": {"search": "SILVERMIC", "symbol": "SILVERMIC", "variant": "micro"},
+    "SILVER_MINI": {"search": "SILVERM", "symbol": "SILVERM", "variant": "mini"},
 }
 
 _SCRIP_MASTER_URLS = (
@@ -61,24 +66,35 @@ def _expiry_from_symbol(symbol: str) -> datetime | None:
     return _parse_expiry(m.group(1))
 
 
-def _is_front_future_row(row: dict[str, Any], base_symbol: str) -> bool:
+def _is_front_future_row(row: dict[str, Any], base_symbol: str, *, variant: str = "standard") -> bool:
     sym = str(row.get("tradingsymbol") or row.get("symbol") or "").upper()
     name = str(row.get("name") or row.get("symbolname") or "").upper()
     if base_symbol not in sym and base_symbol not in name:
         return False
-    if "CRUDEOILM" in sym or "NATGASMINI" in sym:
-        return False
+    if variant == "mini":
+        if base_symbol == "CRUDEOILM" and "CRUDEOILM" not in sym:
+            return False
+        if base_symbol == "NATGASMINI" and "NATGASMINI" not in sym:
+            return False
+        if base_symbol == "SILVERM" and ("SILVERM" not in sym or "SILVERMIC" in sym):
+            return False
+    elif variant == "micro":
+        if "SILVERMIC" not in sym:
+            return False
+    else:
+        if "CRUDEOILM" in sym or "NATGASMINI" in sym or "SILVERMIC" in sym:
+            return False
     inst = str(row.get("instrumenttype") or "").upper()
     if inst and inst not in ("FUTCOM", "FUT"):
         return False
     return "FUT" in sym or inst in ("FUTCOM", "FUT")
 
 
-def _pick_front_month(rows: list[dict[str, Any]], base_symbol: str) -> dict[str, Any] | None:
+def _pick_front_month(rows: list[dict[str, Any]], base_symbol: str, *, variant: str = "standard") -> dict[str, Any] | None:
     today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
     candidates: list[tuple[datetime, dict[str, Any]]] = []
     for row in rows:
-        if not _is_front_future_row(row, base_symbol):
+        if not _is_front_future_row(row, base_symbol, variant=variant):
             continue
         sym = str(row.get("tradingsymbol") or row.get("symbol") or "")
         exp = _parse_expiry(str(row.get("expiry") or "")) or _expiry_from_symbol(sym)
@@ -95,13 +111,23 @@ def _pick_front_month(rows: list[dict[str, Any]], base_symbol: str) -> dict[str,
 def _row_to_payload(key: str, row: dict[str, Any]) -> dict[str, str]:
     labels = {
         "CRUDE_OIL": "Crude Oil",
+        "CRUDE_OIL_MINI": "Crude Oil Mini",
+        "CRUDE_OIL_MEGA": "Crude Oil Mega",
         "NATURAL_GAS": "Natural Gas",
+        "NATURAL_GAS_MINI": "Natural Gas Mini",
+        "NATURAL_GAS_MEGA": "Natural Gas Mega",
         "SILVER_MICRO": "Silver Micro",
+        "SILVER_MINI": "Silver Mini",
     }
     default_lots = {
         "CRUDE_OIL": "10",
+        "CRUDE_OIL_MINI": "10",
+        "CRUDE_OIL_MEGA": "100",
         "NATURAL_GAS": "1250",
+        "NATURAL_GAS_MINI": "250",
+        "NATURAL_GAS_MEGA": "1250",
         "SILVER_MICRO": "1",
+        "SILVER_MINI": "5",
     }
     label = labels.get(key, key.replace("_", " ").title())
     token = str(row.get("symboltoken") or row.get("token") or "").strip()
@@ -183,7 +209,11 @@ def _resolve_via_search(key: str) -> dict[str, str] | None:
     rows = raw.get("data") if isinstance(raw, dict) else None
     if not isinstance(rows, list):
         return None
-    picked = _pick_front_month([r for r in rows if isinstance(r, dict)], meta["symbol"])
+    picked = _pick_front_month(
+        [r for r in rows if isinstance(r, dict)],
+        meta["symbol"],
+        variant=meta.get("variant", "standard"),
+    )
     if not picked:
         return None
     payload = _row_to_payload(key, picked)
@@ -217,7 +247,7 @@ def _resolve_via_master(key: str) -> dict[str, str] | None:
         if str(r.get("exch_seg") or "").upper() == "MCX"
         and str(r.get("name") or "").upper() == meta["symbol"]
     ]
-    picked = _pick_front_month(rows, meta["symbol"])
+    picked = _pick_front_month(rows, meta["symbol"], variant=meta.get("variant", "standard"))
     if not picked:
         return None
     payload = _row_to_payload(key, picked)

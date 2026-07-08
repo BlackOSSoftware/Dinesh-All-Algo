@@ -112,16 +112,16 @@ export function Strategy3SettingsView() {
             label="Number of Windows"
             type="number"
             help={SETTINGS_HELP.windowCount}
-            value={String(cfg.windowCount)}
-            onChange={(v) => setCfg((c) => ({ ...c, windowCount: Math.max(1, Math.min(5, parseNum(v) || 1)) }))}
+            value={numInput(cfg.windowCount)}
+            onChange={(v) => setCfg((c) => ({ ...c, windowCount: parseNum(v) }))}
           />
           <FloatingField
             id="window-gap"
             label="Gap Between Windows (min)"
             type="number"
             help={SETTINGS_HELP.windowGapMinutes}
-            value={String(cfg.windowGapMinutes)}
-            onChange={(v) => setCfg((c) => ({ ...c, windowGapMinutes: Math.max(5, parseNum(v) || 10) }))}
+            value={numInput(cfg.windowGapMinutes)}
+            onChange={(v) => setCfg((c) => ({ ...c, windowGapMinutes: parseNum(v) }))}
           />
           <FloatingField
             id="candle-tf"
@@ -167,7 +167,7 @@ export function Strategy3SettingsView() {
             type="number"
             help={SETTINGS_HELP.quantity}
             value={numInput(cfg.quantity)}
-            onChange={(v) => setCfg((c) => ({ ...c, quantity: Math.max(1, parseNum(v) || 1) }))}
+            onChange={(v) => setCfg((c) => ({ ...c, quantity: parseNum(v) }))}
           />
           <label className="block space-y-2">
             <FieldLabel label="Product Type" help={SETTINGS_HELP.productType} />
@@ -236,7 +236,7 @@ export function Strategy3SettingsView() {
                       min={0}
                       max={200}
                       step={1}
-                      value={tier.entryPercent}
+                      value={numInput(tier.entryPercent)}
                       onChange={(e) => {
                         const val = parseNum(e.target.value);
                         setCfg((c) => ({

@@ -1,4 +1,12 @@
-export type MarketKey = "CRUDE_OIL" | "NATURAL_GAS" | "SILVER_MICRO";
+export type MarketKey =
+  | "CRUDE_OIL"
+  | "CRUDE_OIL_MINI"
+  | "CRUDE_OIL_MEGA"
+  | "NATURAL_GAS"
+  | "NATURAL_GAS_MINI"
+  | "NATURAL_GAS_MEGA"
+  | "SILVER_MICRO"
+  | "SILVER_MINI";
 export type TradingMode = "PAPER" | "LIVE";
 
 export type Strategy2Config = {

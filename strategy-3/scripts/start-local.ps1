@@ -2,6 +2,9 @@ $ErrorActionPreference = "Stop"
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $root
 
+$FrontendUrl = "http://localhost:3002"
+$ChromeProfileName = "indian-algo-strategy-3"
+
 function Start-ManagedProcess {
     param(
         [Parameter(Mandatory=$true)][string]$Name,
@@ -27,11 +30,43 @@ function Stop-ProcessTree {
     }
 }
 
+function Get-ChromePath {
+    $candidates = @(
+        "${env:ProgramFiles}\Google\Chrome\Application\chrome.exe",
+        "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe",
+        (Join-Path $env:LocalAppData "Google\Chrome\Application\chrome.exe")
+    )
+    foreach ($candidate in $candidates) {
+        if (Test-Path $candidate) { return $candidate }
+    }
+    return $null
+}
+
+function Start-ChromeApp {
+    param(
+        [Parameter(Mandatory=$true)][string]$Url,
+        [Parameter(Mandatory=$true)][string]$ProfileName
+    )
+
+    $chrome = Get-ChromePath
+    if (-not $chrome) {
+        Write-Host "Chrome not found. Open $Url manually." -ForegroundColor DarkYellow
+        return $null
+    }
+
+    $profileDir = Join-Path $env:TEMP $ProfileName
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = $chrome
+    $psi.Arguments = "--new-window `"$Url`" --user-data-dir=`"$profileDir`" --no-first-run --no-default-browser-check"
+    $psi.UseShellExecute = $false
+    return [System.Diagnostics.Process]::Start($psi)
+}
+
 $children = @()
 
 try {
     Write-Host "Strategy 3 - starting backend + frontend" -ForegroundColor Cyan
-    Write-Host "Frontend: http://localhost:3002"
+    Write-Host "Frontend: $FrontendUrl"
     Write-Host "Backend : http://127.0.0.1:8002"
     Write-Host "Login   : admin / admin"
     Write-Host ""
@@ -59,9 +94,16 @@ try {
     }
 
     $children += Start-ManagedProcess -Name "Frontend" -Command "npm run start"
+    Start-Sleep -Seconds 4
 
-    Write-Host "Started. Press ENTER in this window to stop backend + frontend." -ForegroundColor Green
-    Write-Host "Closing this CMD window will also close both processes."
+    $chrome = Start-ChromeApp -Url $FrontendUrl -ProfileName $ChromeProfileName
+    if ($null -ne $chrome) {
+        $children += [pscustomobject]@{ Name = "Chrome"; Process = $chrome }
+        Write-Host "Opened Chrome window: $FrontendUrl" -ForegroundColor Green
+    }
+
+    Write-Host "Started. Press ENTER in this window to stop backend, frontend, and Chrome." -ForegroundColor Green
+    Write-Host "Closing this CMD window will also close all processes."
 
     while ($true) {
         foreach ($child in $children) {
@@ -82,7 +124,7 @@ try {
 }
 finally {
     Write-Host ""
-    Write-Host "Stopping Strategy 3 backend + frontend..." -ForegroundColor Yellow
+    Write-Host "Stopping Strategy 3 backend, frontend, and Chrome..." -ForegroundColor Yellow
     foreach ($child in $children) {
         Stop-ProcessTree -Process $child.Process
     }
