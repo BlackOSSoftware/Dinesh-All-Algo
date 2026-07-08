@@ -116,7 +116,7 @@ def main() -> int:
         print("pip install python-dotenv", file=sys.stderr)
         return 1
 
-    load_dotenv(BACKEND_ROOT / ".env")
+    load_dotenv(BACKEND_ROOT / ".env", override=True)
 
     api_key = (os.getenv("ANGEL_API_KEY") or "").strip()
     client_id = (os.getenv("ANGEL_CLIENT_ID") or "").strip()
