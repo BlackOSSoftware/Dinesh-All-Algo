@@ -9,8 +9,8 @@ type AuthState = "checking" | "authenticated" | "guest";
 
 export function AuthGate({ children }: { children: React.ReactNode }) {
   const [state, setState] = useState<AuthState>("checking");
-  const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
+  const [username, setUsername] = useState("admin");
+  const [password, setPassword] = useState("admin");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
