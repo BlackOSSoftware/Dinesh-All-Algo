@@ -38,7 +38,27 @@ try {
 
     $children += Start-ManagedProcess -Name "Backend" -Command "npm run worker"
     Start-Sleep -Seconds 3
-    $children += Start-ManagedProcess -Name "Frontend" -Command "npm run dev"
+
+    $buildId = Join-Path $root ".next\BUILD_ID"
+    $needsBuild = -not (Test-Path $buildId)
+    if (-not $needsBuild) {
+        $buildTime = (Get-Item $buildId).LastWriteTimeUtc
+        $newestSrc = Get-ChildItem -Path (Join-Path $root "src") -Recurse -File -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTimeUtc -Descending |
+            Select-Object -First 1
+        if ($null -ne $newestSrc -and $newestSrc.LastWriteTimeUtc -gt $buildTime) {
+            $needsBuild = $true
+        }
+    }
+    if ($needsBuild) {
+        Write-Host "Building frontend (new or changed source)..." -ForegroundColor Yellow
+        npm run build
+        if ($LASTEXITCODE -ne 0) { throw "npm run build failed." }
+    } else {
+        Write-Host "Using existing production build (.next is up to date)." -ForegroundColor DarkGray
+    }
+
+    $children += Start-ManagedProcess -Name "Frontend" -Command "npm run start"
 
     Write-Host "Started. Press ENTER in this window to stop backend + frontend." -ForegroundColor Green
     Write-Host "Closing this CMD window will also close both processes."
