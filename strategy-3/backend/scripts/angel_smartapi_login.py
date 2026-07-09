@@ -16,7 +16,7 @@ Run (PowerShell):
   python scripts\\angel_smartapi_login.py
 
 On success, writes ANGEL_JWT_TOKEN / ANGEL_REFRESH_TOKEN (and optional feed token)
-into strategy-1..4 backend/.env automatically.
+into this strategy's backend/.env only.
 """
 
 from __future__ import annotations
@@ -30,10 +30,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
-REPO_ROOT = BACKEND_ROOT.parent.parent
-STRATEGY_ENV_PATHS = [
-    REPO_ROOT / f"strategy-{n}" / "backend" / ".env" for n in (1, 2, 3, 4)
-]
+ENV_PATH = BACKEND_ROOT / ".env"
 
 
 def _normalize_totp_secret(raw: str) -> str:
@@ -92,21 +89,19 @@ def _set_env_key(text: str, key: str, value: str) -> str:
 
 
 def _write_tokens_to_env_files(jwt_token: str, refresh_token: str, feed_token: str = "") -> list[Path]:
-    updated: list[Path] = []
-    for path in STRATEGY_ENV_PATHS:
-        if not path.is_file():
-            print(f"skip missing: {path}")
-            continue
-        raw = path.read_text(encoding="utf-8")
-        next_text = _set_env_key(raw, "ANGEL_JWT_TOKEN", jwt_token)
-        if refresh_token:
-            next_text = _set_env_key(next_text, "ANGEL_REFRESH_TOKEN", refresh_token)
-        if feed_token:
-            next_text = _set_env_key(next_text, "ANGEL_FEED_TOKEN", feed_token)
-        if next_text != raw:
-            path.write_text(next_text, encoding="utf-8", newline="\n")
-        updated.append(path)
-    return updated
+    path = ENV_PATH
+    if not path.is_file():
+        print(f"skip missing: {path}")
+        return []
+    raw = path.read_text(encoding="utf-8")
+    next_text = _set_env_key(raw, "ANGEL_JWT_TOKEN", jwt_token)
+    if refresh_token:
+        next_text = _set_env_key(next_text, "ANGEL_REFRESH_TOKEN", refresh_token)
+    if feed_token:
+        next_text = _set_env_key(next_text, "ANGEL_FEED_TOKEN", feed_token)
+    if next_text != raw:
+        path.write_text(next_text, encoding="utf-8", newline="\n")
+    return [path]
 
 
 def main() -> int:
@@ -186,7 +181,7 @@ def main() -> int:
         return 1
 
     updated = _write_tokens_to_env_files(jwt_raw, refresh, feed)
-    print("--- OK: tokens written to strategy .env files ---")
+    print("--- OK: tokens written to backend/.env ---")
     for path in updated:
         print(f"updated: {path}")
     print()

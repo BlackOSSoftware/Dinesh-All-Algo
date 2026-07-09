@@ -162,6 +162,22 @@ class GridBacktestRunIn(BaseModel):
     gridLevelsAbove: int = 0
     gridLevelsBelow: int = 0
     lotsPerGrid: int = 0
+    invertGrid: bool = False
+    buySideMonth: int = 7
+    sellSideMonth: int = 8
+    buySideExpiry: str = ""
+    sellSideExpiry: str = ""
+
+
+class McxExpiryOut(BaseModel):
+    expiry: str
+    expiryLabel: str
+    tradingsymbol: str
+    token: str
+    lotsize: str
+    label: str
+    exchange: str = "MCX"
+    key: str
 
 
 class GridBacktestTradeOut(BaseModel):

@@ -19,7 +19,12 @@ from app.services.angel_orders import search_scrip
 LOG = logging.getLogger(__name__)
 
 _CACHE_PATH = BACKEND_ROOT / "instance" / "mcx_tokens_cache.json"
+_EXPIRIES_CACHE_PATH = BACKEND_ROOT / "instance" / "mcx_expiries_cache.json"
 _CACHE_TTL_SEC = 6 * 3600  # 6 hours
+_EXPIRIES_CACHE_TTL_SEC = 300  # 5 minutes
+
+_SCRIP_MASTER_CACHE: list[dict[str, Any]] | None = None
+_SCRIP_MASTER_CACHE_TS: float = 0.0
 
 _MCX_LOOKUP: dict[str, dict[str, str]] = {
     "CRUDE_OIL": {"search": "CRUDEOIL", "symbol": "CRUDEOIL", "variant": "standard"},
@@ -71,6 +76,8 @@ def _is_front_future_row(row: dict[str, Any], base_symbol: str, *, variant: str 
     name = str(row.get("name") or row.get("symbolname") or "").upper()
     if base_symbol not in sym and base_symbol not in name:
         return False
+    if sym.endswith("CE") or sym.endswith("PE"):
+        return False
     if variant == "mini":
         if base_symbol == "CRUDEOILM" and "CRUDEOILM" not in sym:
             return False
@@ -87,7 +94,166 @@ def _is_front_future_row(row: dict[str, Any], base_symbol: str, *, variant: str 
     inst = str(row.get("instrumenttype") or "").upper()
     if inst and inst not in ("FUTCOM", "FUT"):
         return False
-    return "FUT" in sym or inst in ("FUTCOM", "FUT")
+    if sym.endswith("FUT"):
+        return True
+    return inst in ("FUTCOM", "FUT")
+
+
+def _rows_from_search(key: str, meta: dict[str, str]) -> list[dict[str, Any]]:
+    if not settings.angel_api_key.strip() or not settings.angel_jwt_token.strip():
+        return []
+    try:
+        raw = search_scrip(
+            exchange="MCX",
+            searchscrip=meta["search"],
+            timeout_sec=float(settings.angel_request_timeout_sec or 15.0),
+            **_angel_headers(),
+        )
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning("MCX searchScrip failed for %s: %s", key, exc)
+        return []
+    data = raw.get("data") if isinstance(raw, dict) else None
+    if not isinstance(data, list):
+        return []
+    rows: list[dict[str, Any]] = []
+    seen_syms: set[str] = set()
+    for row in data:
+        if not isinstance(row, dict):
+            continue
+        if not _is_front_future_row(row, meta["symbol"], variant=meta.get("variant", "standard")):
+            continue
+        sym = str(row.get("tradingsymbol") or row.get("symbol") or "").strip().upper()
+        if not sym or sym in seen_syms:
+            continue
+        seen_syms.add(sym)
+        rows.append(row)
+    return rows
+
+
+def _collect_future_rows(key: str) -> list[dict[str, Any]]:
+    meta = _MCX_LOOKUP.get(key)
+    if not meta:
+        return []
+
+    rows = _rows_from_search(key, meta)
+    if rows:
+        return rows
+
+    master_rows = [
+        r
+        for r in _get_scrip_master_cached()
+        if str(r.get("exch_seg") or r.get("exchange") or "").upper() == "MCX"
+        and str(r.get("name") or r.get("symbol") or "").upper() == meta["symbol"]
+    ]
+    out: list[dict[str, Any]] = []
+    seen_syms: set[str] = set()
+    for row in master_rows:
+        if not _is_front_future_row(row, meta["symbol"], variant=meta.get("variant", "standard")):
+            continue
+        sym = str(row.get("tradingsymbol") or row.get("symbol") or "").strip().upper()
+        if not sym or sym in seen_syms:
+            continue
+        seen_syms.add(sym)
+        out.append(row)
+    return out
+
+
+def _row_expiry(row: dict[str, Any]) -> datetime | None:
+    sym = str(row.get("tradingsymbol") or row.get("symbol") or "")
+    return _parse_expiry(str(row.get("expiry") or "")) or _expiry_from_symbol(sym)
+
+
+def _expiry_payload(key: str, row: dict[str, Any], exp: datetime) -> dict[str, str]:
+    base = _row_to_payload(key, row)
+    return {
+        **base,
+        "expiry": exp.strftime("%Y-%m-%d"),
+        "expiryLabel": exp.strftime("%d %b %Y").upper(),
+    }
+
+
+def _load_expiries_disk_cache(key: str) -> list[dict[str, str]] | None:
+    if not _EXPIRIES_CACHE_PATH.is_file():
+        return None
+    try:
+        data = json.loads(_EXPIRIES_CACHE_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    entry = data.get(key)
+    if not isinstance(entry, dict):
+        return None
+    ts = float(entry.get("_ts") or 0)
+    if time.time() - ts > _EXPIRIES_CACHE_TTL_SEC:
+        return None
+    rows = entry.get("rows")
+    if not isinstance(rows, list):
+        return None
+    out = [r for r in rows if isinstance(r, dict) and r.get("expiry") and r.get("tradingsymbol")]
+    return out or None
+
+
+def _save_expiries_disk_cache(key: str, rows: list[dict[str, str]]) -> None:
+    cache: dict[str, Any] = {}
+    if _EXPIRIES_CACHE_PATH.is_file():
+        try:
+            loaded = json.loads(_EXPIRIES_CACHE_PATH.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                cache = loaded
+        except (OSError, json.JSONDecodeError):
+            cache = {}
+    cache[key] = {"_ts": time.time(), "rows": rows}
+    _EXPIRIES_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _EXPIRIES_CACHE_PATH.write_text(json.dumps(cache, indent=2), encoding="utf-8")
+
+
+def list_mcx_future_expiries(key: str, *, include_expired: bool = False) -> list[dict[str, str]]:
+    """List MCX futures contracts for a market, sorted by expiry ascending."""
+    k = (key or "").strip().upper()
+    cache_key = f"{k}:{'all' if include_expired else 'live'}"
+    cached = _load_expiries_disk_cache(cache_key)
+    if cached:
+        return cached
+
+    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    candidates: list[tuple[datetime, dict[str, Any]]] = []
+    for row in _collect_future_rows(k):
+        exp = _row_expiry(row)
+        if exp is None:
+            continue
+        if not include_expired and exp < today:
+            continue
+        candidates.append((exp, row))
+    candidates.sort(key=lambda x: x[0])
+    out = [_expiry_payload(k, row, exp) for exp, row in candidates]
+    if not out and not include_expired:
+        out = list_mcx_future_expiries(k, include_expired=True)
+        cache_key = f"{k}:all"
+    if out:
+        _save_expiries_disk_cache(cache_key, out)
+    return out
+
+
+def resolve_mcx_instrument_for_expiry(key: str, expiry_iso: str) -> dict[str, str] | None:
+    """Resolve a specific MCX futures contract by expiry date (YYYY-MM-DD)."""
+    k = (key or "").strip().upper()
+    target_text = (expiry_iso or "").strip()[:10]
+    if not target_text:
+        return None
+    try:
+        target = datetime.strptime(target_text, "%Y-%m-%d").replace(hour=0, minute=0, second=0, microsecond=0)
+    except ValueError:
+        return None
+    for row in _collect_future_rows(k):
+        exp = _row_expiry(row)
+        if exp is None:
+            continue
+        if exp.date() == target.date():
+            payload = _expiry_payload(k, row, exp)
+            if payload.get("token") and payload.get("tradingsymbol"):
+                return payload
+    return None
 
 
 def _pick_front_month(rows: list[dict[str, Any]], base_symbol: str, *, variant: str = "standard") -> dict[str, Any] | None:
@@ -228,7 +394,7 @@ def _download_scrip_master() -> list[dict[str, Any]]:
     for url in _SCRIP_MASTER_URLS:
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "strategy2/1.0"})
-            with urllib.request.urlopen(req, timeout=90, context=ctx) as resp:
+            with urllib.request.urlopen(req, timeout=45, context=ctx) as resp:
                 data = json.loads(resp.read().decode("utf-8", errors="replace"))
             if isinstance(data, list):
                 return [r for r in data if isinstance(r, dict)]
@@ -237,13 +403,24 @@ def _download_scrip_master() -> list[dict[str, Any]]:
     return []
 
 
+def _get_scrip_master_cached() -> list[dict[str, Any]]:
+    global _SCRIP_MASTER_CACHE, _SCRIP_MASTER_CACHE_TS
+    if _SCRIP_MASTER_CACHE is not None and time.time() - _SCRIP_MASTER_CACHE_TS < _CACHE_TTL_SEC:
+        return _SCRIP_MASTER_CACHE
+    rows = _download_scrip_master()
+    if rows:
+        _SCRIP_MASTER_CACHE = rows
+        _SCRIP_MASTER_CACHE_TS = time.time()
+    return rows
+
+
 def _resolve_via_master(key: str) -> dict[str, str] | None:
     meta = _MCX_LOOKUP.get(key)
     if not meta:
         return None
     rows = [
         r
-        for r in _download_scrip_master()
+        for r in _get_scrip_master_cached()
         if str(r.get("exch_seg") or "").upper() == "MCX"
         and str(r.get("name") or "").upper() == meta["symbol"]
     ]

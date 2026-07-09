@@ -74,7 +74,11 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
         setError(data.error ?? data.detail ?? "Login failed");
         return;
       }
-      if (data.access_token) setStoredToken(data.access_token);
+      if (!data.access_token) {
+        setError(data.error ?? "Login succeeded but no access token was returned.");
+        return;
+      }
+      setStoredToken(data.access_token);
       setState("authenticated");
     } catch (err) {
       const reason = err instanceof Error ? err.message : "Network error";

@@ -17,10 +17,13 @@ from app.models import StrategySettings, TradePosition, User
 from app.services import angel_orders
 from app.services import trading_repository as tr
 from app.services.grid_logic import (
+    default_runtime,
     grid_order_price,
     load_runtime,
     parse_strategy_config,
     process_price_tick,
+    resolve_active_expiry,
+    resolve_invert_grid,
     seed_runtime_market_price,
 )
 from app.services.mcx_instruments import get_instrument
@@ -464,14 +467,18 @@ def process_user_tick(db, user_id: int) -> None:
         return
 
     cfg = tr.load_config_dict(db, user_id)
-    parsed = parse_strategy_config(cfg)
+    now = _ist_now()
+    effective_invert = resolve_invert_grid(cfg, as_of=now)
+    cfg = {**cfg, "invertGrid": effective_invert}
+    parsed = parse_strategy_config(cfg, as_of=now)
     if parsed["reference_price"] <= 0 or parsed["grid_gap"] <= 0:
         return
 
     if not _in_session(parsed["start_time"], parsed["end_time"]):
         return
 
-    instrument = get_instrument(parsed["market"])
+    active_expiry = resolve_active_expiry(cfg, as_of=now)
+    instrument = get_instrument(parsed["market"], expiry_iso=active_expiry or None)
     if not instrument:
         return
 
@@ -487,6 +494,10 @@ def process_user_tick(db, user_id: int) -> None:
         return
 
     runtime = load_runtime(cfg)
+    prev_invert = runtime.get("effectiveInvertGrid")
+    if prev_invert is not None and bool(prev_invert) != effective_invert:
+        runtime = default_runtime()
+    runtime["effectiveInvertGrid"] = effective_invert
     runtime = seed_runtime_market_price(runtime, price)
     prev_runtime = copy.deepcopy(runtime)
     runtime, actions = process_price_tick({**cfg, "grid_runtime": runtime}, runtime, price)

@@ -17,6 +17,8 @@ from app.services.grid_logic import (
     build_grid_levels,
     default_runtime,
     parse_strategy_config,
+    resolve_active_expiry,
+    resolve_invert_grid,
     validate_grid_trade_sequence,
 )
 from app.services.mcx_instruments import get_instrument
@@ -139,6 +141,10 @@ def _config_from_params(params: dict[str, Any]) -> dict[str, Any]:
         "gridLevelsBelow": params.get("gridLevelsBelow") or 0,
         "lotsPerGrid": params.get("lotsPerGrid") or 0,
         "invertGrid": params.get("invertGrid") or False,
+        "buySideMonth": params.get("buySideMonth") or 7,
+        "sellSideMonth": params.get("sellSideMonth") or 8,
+        "buySideExpiry": params.get("buySideExpiry") or "",
+        "sellSideExpiry": params.get("sellSideExpiry") or "",
     }
 
 
@@ -166,6 +172,9 @@ def run_grid_backtest(params: dict[str, Any]) -> dict[str, Any]:
     if not settings.angel_api_key.strip() or not settings.angel_jwt_token.strip():
         raise ValueError("Angel One JWT not configured")
 
+    display_expiry = resolve_active_expiry(cfg, as_of=to_date) or None
+    display_instrument = get_instrument(parsed["market"], expiry_iso=display_expiry) or instrument
+
     levels = build_grid_levels(
         reference_price=parsed["reference_price"],
         grid_gap=parsed["grid_gap"],
@@ -173,7 +182,7 @@ def run_grid_backtest(params: dict[str, Any]) -> dict[str, Any]:
         levels_below=parsed["grid_levels_below"],
         initial_lots=parsed["initial_lots"],
         lots_per_grid=parsed["lots_per_grid"],
-        invert_grid=parsed["invert_grid"],
+        invert_grid=resolve_invert_grid(cfg, as_of=to_date),
     )
 
     runtime = default_runtime()
@@ -188,8 +197,13 @@ def run_grid_backtest(params: dict[str, Any]) -> dict[str, Any]:
     skipped_dates: list[str] = []
     max_lots = 0
     bootstrapped = False
+    prev_invert: bool | None = None
 
     def _fetch_one(date: str) -> tuple[str, list[dict[str, Any]]]:
+        day_expiry = resolve_active_expiry(cfg, as_of=date)
+        day_inst = get_instrument(parsed["market"], expiry_iso=day_expiry or None) or instrument
+        if not day_inst.configured:
+            return date, []
         last_exc: Exception | None = None
         for attempt in range(FETCH_RETRIES):
             try:
@@ -197,8 +211,8 @@ def run_grid_backtest(params: dict[str, Any]) -> dict[str, Any]:
                     date=date,
                     start_time=parsed["start_time"],
                     end_time=parsed["end_time"],
-                    exchange=instrument.exchange,
-                    symboltoken=instrument.token,
+                    exchange=day_inst.exchange,
+                    symboltoken=day_inst.token,
                 )
                 if candles:
                     return date, candles
@@ -227,6 +241,17 @@ def run_grid_backtest(params: dict[str, Any]) -> dict[str, Any]:
             skipped_dates.append(date)
             continue
 
+        effective_invert = resolve_invert_grid(cfg, as_of=date)
+        day_cfg = {**cfg, "invertGrid": effective_invert}
+        if prev_invert is not None and effective_invert != prev_invert:
+            runtime = default_runtime()
+            bootstrapped = False
+        prev_invert = effective_invert
+
+        day_expiry = resolve_active_expiry(cfg, as_of=date)
+        day_inst = get_instrument(parsed["market"], expiry_iso=day_expiry or None) or instrument
+        day_symbol = day_inst.tradingsymbol
+
         days_run += 1
         day_start_pnl = float(runtime.get("realizedPnl") or 0)
         day_start_trades = len(trades)
@@ -239,14 +264,14 @@ def run_grid_backtest(params: dict[str, Any]) -> dict[str, Any]:
 
             if not bootstrapped:
                 runtime, boot_acts = bootstrap_initial_entry(
-                    cfg,
+                    day_cfg,
                     runtime,
                     fill_price=parsed["reference_price"],
                 )
                 for act in boot_acts:
                     events.append({**act, "id": event_id, "date": date, "time": time_str})
                     event_id += 1
-                    trades.append(_trade_row(trade_id, date, time_str, act, instrument.tradingsymbol))
+                    trades.append(_trade_row(trade_id, date, time_str, act, day_symbol))
                     trade_id += 1
                 bootstrapped = True
                 max_lots = max(max_lots, int(runtime.get("positionLots") or 0))
@@ -256,7 +281,7 @@ def run_grid_backtest(params: dict[str, Any]) -> dict[str, Any]:
                 day_open = False
 
             runtime, actions = process_backtest_candle(
-                cfg,
+                day_cfg,
                 runtime,
                 open_price=float(o),
                 close_price=float(c),
@@ -267,7 +292,7 @@ def run_grid_backtest(params: dict[str, Any]) -> dict[str, Any]:
             for act in actions:
                 events.append({**act, "id": event_id, "date": date, "time": time_str})
                 event_id += 1
-                trades.append(_trade_row(trade_id, date, time_str, act, instrument.tradingsymbol))
+                trades.append(_trade_row(trade_id, date, time_str, act, day_symbol))
                 trade_id += 1
 
             max_lots = max(max_lots, int(runtime.get("positionLots") or 0))
@@ -307,7 +332,7 @@ def run_grid_backtest(params: dict[str, Any]) -> dict[str, Any]:
     return {
         "ok": days_run > 0,
         "message": "" if days_run > 0 else "No candle data for selected range",
-        "instrument": instrument.tradingsymbol,
+        "instrument": display_instrument.tradingsymbol,
         "market": parsed["market"],
         "fromDate": from_date,
         "toDate": to_date,

@@ -1,5 +1,5 @@
 import { getApiBase, getStoredToken } from "@/lib/auth";
-import type { DashboardSnapshot, GridBacktestParams, GridBacktestResult, Strategy2Config, TradingMode } from "@/lib/strategy2/types";
+import type { DashboardSnapshot, GridBacktestParams, GridBacktestResult, MarketKey, McxExpiryOption, Strategy2Config, TradingMode } from "@/lib/strategy2/types";
 import { configToApi } from "@/lib/strategy2/types";
 
 async function apiFetch(path: string, init?: RequestInit) {
@@ -60,6 +60,11 @@ export async function clearTradingLogs() {
 
 export async function clearCompletedTrades() {
   return apiFetch("/trading/positions/completed", { method: "DELETE" });
+}
+
+export async function fetchMcxExpiries(market: MarketKey, includeExpired = false): Promise<McxExpiryOption[]> {
+  const q = new URLSearchParams({ market, includeExpired: includeExpired ? "true" : "false" });
+  return apiFetch(`/trading/mcx-expiries?${q.toString()}`) as Promise<McxExpiryOption[]>;
 }
 
 export async function runGridBacktest(params: GridBacktestParams): Promise<GridBacktestResult> {

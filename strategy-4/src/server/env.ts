@@ -1,10 +1,12 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-const envPath = resolve(process.cwd(), ".env");
+const envPath = resolve(process.cwd(), ".env.local");
+const fallbackEnvPath = resolve(process.cwd(), ".env");
 
-if (existsSync(envPath)) {
-  for (const line of readFileSync(envPath, "utf8").split(/\r?\n/)) {
+for (const filePath of [envPath, fallbackEnvPath]) {
+  if (!existsSync(filePath)) continue;
+  for (const line of readFileSync(filePath, "utf8").split(/\r?\n/)) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith("#")) continue;
     const index = trimmed.indexOf("=");

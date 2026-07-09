@@ -400,3 +400,43 @@ def test_invert_grid_u_ladder_opposite_of_normal():
         ("EXIT", "BASE"),
     ]
     assert rt["positionLots"] == 10
+
+
+def test_resolve_invert_grid_buy_and_sell_months():
+    from app.services.grid_logic import resolve_invert_grid
+
+    cfg = {"buySideMonth": 7, "sellSideMonth": 8, "invertGrid": False}
+    assert resolve_invert_grid(cfg, as_of="2025-07-15") is False
+    assert resolve_invert_grid(cfg, as_of="2025-08-01") is True
+    assert resolve_invert_grid(cfg, as_of="2025-09-10") is False
+
+
+def test_resolve_invert_grid_buy_and_sell_expiries():
+    from app.services.grid_logic import resolve_invert_grid
+
+    cfg = {
+        "buySideExpiry": "2026-07-19",
+        "sellSideExpiry": "2026-08-19",
+        "invertGrid": False,
+    }
+    assert resolve_invert_grid(cfg, as_of="2026-07-10") is False
+    assert resolve_invert_grid(cfg, as_of="2026-08-05") is True
+    assert resolve_invert_grid(cfg, as_of="2026-09-01") is False
+
+
+def test_resolve_active_expiry():
+    from app.services.grid_logic import resolve_active_expiry
+
+    cfg = {"buySideExpiry": "2026-07-19", "sellSideExpiry": "2026-08-19"}
+    assert resolve_active_expiry(cfg, as_of="2026-07-10") == "2026-07-19"
+    assert resolve_active_expiry(cfg, as_of="2026-08-05") == "2026-08-19"
+
+
+def test_parse_strategy_config_uses_month():
+    from app.services.grid_logic import parse_strategy_config
+
+    cfg = {"buySideMonth": 7, "sellSideMonth": 8, "referencePrice": 300, "gridGap": 2}
+    july = parse_strategy_config(cfg, as_of="2025-07-01")
+    august = parse_strategy_config(cfg, as_of="2025-08-01")
+    assert july["invert_grid"] is False
+    assert august["invert_grid"] is True

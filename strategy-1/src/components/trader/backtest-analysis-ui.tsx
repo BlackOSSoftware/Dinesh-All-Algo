@@ -13,7 +13,7 @@ import {
 import { cn } from "@/components/ui";
 import {
   type ChartCandle,
-  type CycleTradeRecord,
+  type CycleTableRow,
   type DayDetail,
   type DaySummaryRow,
   type NetBreakdown,
@@ -525,75 +525,75 @@ function BreakdownCard({ title, rows }: { title: string; rows: { label: string; 
 /* ─── Trade Record (table) ─── */
 
 export function TradeRecordSection({
-  cycleRecords,
+  tableRows,
   onExportExcel,
   onExportCsv,
 }: {
-  cycleRecords: CycleTradeRecord[];
+  tableRows: CycleTableRow[];
   onExportExcel: () => void;
   onExportCsv?: () => void;
 }) {
   const [search, setSearch] = useState("");
 
   const filtered = useMemo(() => {
-    if (!search.trim()) return cycleRecords;
+    if (!search.trim()) return tableRows;
     const q = search.toLowerCase();
-    return cycleRecords.filter((r) =>
+    return tableRows.filter((r) =>
       [
         r.date,
         r.side,
         r.cycleId,
         r.cycleKind,
-        r.initialEntry?.strike,
-        r.reentryStrike,
+        r.action,
+        r.strike,
         r.exitReason,
-        r.initialEntry?.time,
-        r.tp1Time,
-        r.tp2Time,
       ].some((x) => String(x ?? "").toLowerCase().includes(q)),
     );
-  }, [cycleRecords, search]);
+  }, [tableRows, search]);
 
-  function formatLegSummary(record: CycleTradeRecord) {
-    const entry = record.initialEntry;
-    const entryText = entry
-      ? `${entry.time} @ ${fmtPx(entry.indexPrice)} · ${entry.strike} · ${entry.lots} lot`
-      : "—";
-    if (!record.averaging.length) return entryText;
-    const avgText = record.averaging
-      .map((leg, index) => `AVG${index + 1} ${leg.time} @ ${fmtPx(leg.indexPrice)} · ${leg.strike} · ${leg.lots} lot`)
-      .join(" | ");
-    return `${entryText}\n${avgText}`;
-  }
+  const cycleCount = useMemo(
+    () => new Set(tableRows.map((r) => r.cycleId).filter(Boolean)).size,
+    [tableRows],
+  );
 
-  function formatTp1Summary(record: CycleTradeRecord) {
-    if (record.firstEntryTp1) {
-      return `First TP1: ${record.firstEntryTp1.time} @ ${fmtPx(record.firstEntryTp1.price)} · ${record.firstEntryTp1.lots} lot · +${record.firstEntryTp1.pnl} pts`;
-    }
-    if (record.tp1Price != null) {
-      return `TP1: ${record.tp1Time ?? "—"} @ ${fmtPx(record.tp1Price)} · ${record.tp1ExitLots} lot exit`;
-    }
-    return "—";
-  }
-
-  function formatFinalExitSummary(record: CycleTradeRecord) {
-    if (record.tp2ExitPrice == null) return "—";
-    const adaptiveLevel =
-      record.tp2AdaptiveHigh != null
-        ? `Adaptive High ${fmtPx(record.tp2AdaptiveHigh)}`
-        : record.tp2AdaptiveLow != null
-          ? `Adaptive Low ${fmtPx(record.tp2AdaptiveLow)}`
-          : null;
-    const pnlText = record.tp2Pnl != null ? `+${record.tp2Pnl} pts` : null;
-    return [
-      `${record.tp2Time ?? "—"} @ ${fmtPx(record.tp2ExitPrice)}`,
-      record.exitReason || null,
-      adaptiveLevel,
-      pnlText,
-    ]
-      .filter(Boolean)
-      .join("\n");
-  }
+  const cols: { key: keyof CycleTableRow; label: string; fmt?: (v: unknown, r: CycleTableRow) => string }[] = [
+    { key: "rowNum", label: "#" },
+    { key: "date", label: "Date", fmt: (v) => fmtDate(String(v)) },
+    { key: "time", label: "Time" },
+    { key: "cycleId", label: "Cycle" },
+    { key: "action", label: "Action" },
+    { key: "side", label: "Side" },
+    { key: "cycleKind", label: "Kind" },
+    { key: "basePrice", label: "Base", fmt: (v) => (v != null ? fmtPx(Number(v)) : "—") },
+    { key: "triggerPrice", label: "Trigger", fmt: (v) => (v != null ? fmtPx(Number(v)) : "—") },
+    { key: "strike", label: "Strike" },
+    { key: "strikeType", label: "Strike Type" },
+    { key: "lots", label: "Lots" },
+    { key: "totalLots", label: "Total Lots" },
+    { key: "tp1", label: "TP1", fmt: (v) => (v != null ? fmtPx(Number(v)) : "—") },
+    {
+      key: "adaptiveHigh",
+      label: "Adaptive H/L",
+      fmt: (_v, r) => {
+        if (r.adaptiveHigh != null) return fmtPx(r.adaptiveHigh);
+        if (r.adaptiveLow != null) return fmtPx(r.adaptiveLow);
+        return "—";
+      },
+    },
+    { key: "stopLoss", label: "SL", fmt: (v) => (v != null ? fmtPx(Number(v)) : "—") },
+    { key: "exitPrice", label: "Exit", fmt: (v) => (v != null ? fmtPx(Number(v)) : "—") },
+    { key: "exitReason", label: "Exit Reason" },
+    {
+      key: "cyclePnl",
+      label: "Cycle P&L",
+      fmt: (v) => (v != null ? String(v) : "—"),
+    },
+    {
+      key: "runningPnl",
+      label: "Running",
+      fmt: (v) => (v != null ? String(v) : "—"),
+    },
+  ];
 
   return (
     <BtCard className="!p-0 overflow-hidden">
@@ -602,7 +602,7 @@ export function TradeRecordSection({
           <div>
             <h3 className="text-sm font-semibold text-[var(--text-primary)]">Trade Record</h3>
             <p className="text-xs text-[var(--text-muted)]">
-              {filtered.length} trade cycle(s) · one row per full trade
+              {cycleCount} cycle(s) · {filtered.length} rows · chronological order
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -620,96 +620,63 @@ export function TradeRecordSection({
           <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--text-muted)]" />
           <input
             className="h-9 w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-elevated)] pl-8 pr-3 text-xs text-[var(--text-secondary)] outline-none focus:border-teal-500/50"
-            placeholder="Search date, side, cycle, strike, exit reason…"
+            placeholder="Search date, side, cycle, action, strike…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
         </div>
       </div>
       <div className="max-h-[600px] overflow-auto">
-        <table className="w-full min-w-[1700px] text-left text-[11px]">
+        <table className="w-full min-w-[1800px] text-left text-[11px]">
           <thead className="sticky top-0 z-10 bg-[var(--surface-elevated)] text-[var(--text-muted)]">
             <tr>
-              {[
-                "#",
-                "Date",
-                "Cycle",
-                "Side",
-                "Type",
-                "Base",
-                "Trigger",
-                "Entry Flow",
-                "First Entry TP1",
-                "Avg TP1",
-                "Final Exit",
-                "SL",
-                "Total Lots",
-                "Exit Reason",
-                "Cycle P&L",
-                "Running",
-              ].map((label) => (
-                <th key={label} className="whitespace-nowrap px-2 py-2 font-medium">
-                  {label}
+              {cols.map((c) => (
+                <th key={c.key} className="whitespace-nowrap px-2 py-2 font-medium">
+                  {c.label}
                 </th>
               ))}
             </tr>
           </thead>
           <tbody>
-            {filtered.map((record, idx) => {
-              const entryTone = record.side === "CALL" ? "text-emerald-400" : "text-rose-400";
-              const pnlTone = record.cyclePnl >= 0 ? "text-emerald-400" : "text-rose-400";
+            {filtered.map((r, idx) => {
+              const prev = idx > 0 ? filtered[idx - 1] : null;
+              const cycleBreak = !prev || prev.cycleId !== r.cycleId || prev.date !== r.date;
               return (
-                <tr key={record.uid} className="border-t border-white/[0.04] align-top hover:bg-white/[0.02]">
-                  <td className="whitespace-nowrap px-2 py-2 font-mono text-[var(--text-secondary)]">{idx + 1}</td>
-                  <td className="whitespace-nowrap px-2 py-2 font-mono text-[var(--text-secondary)]">{fmtDate(record.date)}</td>
-                  <td className="whitespace-nowrap px-2 py-2 font-mono text-[var(--text-secondary)]">{record.cycleId}</td>
-                  <td className={cn("whitespace-nowrap px-2 py-2 font-mono font-semibold", entryTone)}>{record.side}</td>
-                  <td className="whitespace-nowrap px-2 py-2 font-mono text-teal-300">
-                    {record.cycleKind === "INITIAL" ? "Initial Trade" : "Re-entry Trade"}
-                  </td>
-                  <td className="whitespace-nowrap px-2 py-2 font-mono text-[var(--text-secondary)]">
-                    {record.basePrice != null ? fmtPx(record.basePrice) : "—"}
-                  </td>
-                  <td className="whitespace-nowrap px-2 py-2 font-mono text-[var(--text-secondary)]">
-                    {record.triggerPrice != null ? fmtPx(record.triggerPrice) : "—"}
-                  </td>
-                  <td className="px-2 py-2 font-mono whitespace-pre-line text-[var(--text-secondary)]">
-                    {formatLegSummary(record)}
-                  </td>
-                  <td className="px-2 py-2 font-mono whitespace-pre-line text-sky-300">
-                    {formatTp1Summary(record)}
-                  </td>
-                  <td className="px-2 py-2 font-mono whitespace-pre-line text-violet-300">
-                    {record.avgTp1Exits.length
-                      ? record.avgTp1Exits
-                          .map((avg) => `${avg.time} @ ${fmtPx(avg.price)} · ${avg.lots} lot · +${avg.pnl} pts`)
-                          .join("\n")
-                      : "—"}
-                  </td>
-                  <td className="px-2 py-2 font-mono whitespace-pre-line text-[var(--text-secondary)]">
-                    {formatFinalExitSummary(record)}
-                  </td>
-                  <td className="whitespace-nowrap px-2 py-2 font-mono text-[var(--text-secondary)]">
-                    {record.stopLoss != null ? fmtPx(record.stopLoss) : "—"}
-                  </td>
-                  <td className="whitespace-nowrap px-2 py-2 font-mono text-[var(--text-secondary)]">
-                    {record.totalLotsUsed || "—"}
-                  </td>
-                  <td className="whitespace-nowrap px-2 py-2 font-mono text-[var(--text-secondary)]">
-                    {record.exitReason || "—"}
-                  </td>
-                  <td className={cn("whitespace-nowrap px-2 py-2 font-mono font-semibold", pnlTone)}>
-                    {record.cyclePnl}
-                  </td>
-                  <td className="whitespace-nowrap px-2 py-2 font-mono text-[var(--text-secondary)]">
-                    {record.runningPnl}
-                  </td>
+                <tr
+                  key={r.uid}
+                  className={cn(
+                    "border-t border-white/[0.04] hover:bg-white/[0.02]",
+                    cycleBreak && idx > 0 && "border-t-2 border-teal-500/20",
+                    r.cycleSummary && "bg-white/[0.02]",
+                  )}
+                >
+                  {cols.map((c) => {
+                    const raw = r[c.key];
+                    const display = c.fmt ? c.fmt(raw, r) : raw == null || raw === "" ? "—" : String(raw);
+                    const tone =
+                      c.key === "cyclePnl" && typeof raw === "number"
+                        ? raw >= 0
+                          ? "text-emerald-400 font-semibold"
+                          : "text-rose-400 font-semibold"
+                        : c.key === "side"
+                          ? r.side === "CALL"
+                            ? "text-emerald-400 font-semibold"
+                            : "text-rose-400 font-semibold"
+                          : c.key === "action"
+                            ? "text-teal-300 font-medium"
+                            : "text-[var(--text-secondary)]";
+                    return (
+                      <td key={c.key} className={cn("whitespace-nowrap px-2 py-1.5 font-mono", tone)}>
+                        {display}
+                      </td>
+                    );
+                  })}
                 </tr>
               );
             })}
             {!filtered.length ? (
               <tr>
-                <td colSpan={15} className="px-3 py-8 text-center text-[var(--text-muted)]">
+                <td colSpan={cols.length} className="px-3 py-8 text-center text-[var(--text-muted)]">
                   No trade records match your search.
                 </td>
               </tr>
@@ -764,7 +731,7 @@ export function BacktestGuideSection() {
               <li><strong className="text-[var(--text-secondary)]">Timeline</strong> — kab entry/exit hua</li>
               <li><strong className="text-[var(--text-secondary)]">Chart</strong> — us din ki price + levels (zoom/pan)</li>
               <li><strong className="text-[var(--text-secondary)]">Net breakdown</strong> — points ka hisaab</li>
-              <li><strong className="text-[var(--text-secondary)]">Trade Record</strong> — har cycle ek card (Initial/Re-entry, AVG, TP1, TP2, Net P&L)</li>
+              <li><strong className="text-[var(--text-secondary)]">Trade Record</strong> — har entry/exit alag row, chronological order</li>
               <li><strong className="text-[var(--text-secondary)]">Timeline</strong> — din bhar events ka flow</li>
             </ul>
           </div>

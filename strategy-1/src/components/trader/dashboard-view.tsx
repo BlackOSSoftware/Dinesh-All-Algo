@@ -178,7 +178,7 @@ export function DashboardView() {
                 className="mt-1 inline-flex items-center gap-1 rounded bg-amber-500 px-2 py-0.5 text-[10px] font-medium text-white disabled:opacity-60"
               >
                 <RefreshCw className={cn("h-3 w-3", d.angelRefreshBusy && "animate-spin")} />
-                {d.angelRefreshBusy ? "Regenerating…" : "Regenerate"}
+                {d.angelRefreshBusy ? "Generating token…" : "Generate Token"}
               </button>
             ) : sensexStale && livePx != null ? (
               <p className="mt-0.5 text-[10px] text-amber-600">Last saved quote</p>
@@ -467,7 +467,7 @@ export function DashboardView() {
             disabled={d.angelRefreshBusy}
             className="rounded bg-[var(--accent)] px-3 py-1.5 text-xs font-medium text-white disabled:opacity-60"
           >
-            {d.angelRefreshBusy ? "Regenerating Angel token…" : "Regenerate Angel Token"}
+            {d.angelRefreshBusy ? "Generating token…" : "Generate Token"}
           </button>
           {d.angelRefreshFeedback ? (
             <p className="mt-1 text-[11px] text-[var(--text-muted)]">{d.angelRefreshFeedback}</p>

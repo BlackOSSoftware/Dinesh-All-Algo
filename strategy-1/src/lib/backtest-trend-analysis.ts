@@ -892,35 +892,114 @@ export function cycleTableRowsToExportRows(rows: CycleTableRow[]): (string | num
 }
 
 export function cycleRecordsToExportRows(records: CycleTradeRecord[]): (string | number)[][] {
-  return records.map((c) => [
-    c.order,
-    fmtDate(c.date),
-    c.cycleId,
-    c.side,
-    c.cycleKind === "INITIAL" ? "Initial Trade" : "Re-entry Trade",
-    c.basePrice ?? "",
-    c.triggerPrice ?? "",
-    c.initialEntry
-      ? `${c.initialEntry.time} @ ${fmtPx(c.initialEntry.indexPrice)} · ${c.initialEntry.strike} · ${c.initialEntry.lots} lot`
-      : "",
-    c.averaging
-      .map((a, index) => `AVG${index + 1} ${a.time} @ ${fmtPx(a.indexPrice)} · ${a.strike} · ${a.lots} lot`)
-      .join(" | "),
-    c.firstEntryTp1
-      ? `${c.firstEntryTp1.time} @ ${fmtPx(c.firstEntryTp1.price)} · ${c.firstEntryTp1.lots} lot · +${c.firstEntryTp1.pnl}`
-      : "",
-    c.avgTp1Exits
-      .map((avg) => `${avg.time} @ ${fmtPx(avg.price)} · ${avg.lots} lot · +${avg.pnl}`)
-      .join(" | "),
-    c.tp2ExitPrice != null
-      ? `${c.tp2Time ?? ""} @ ${fmtPx(c.tp2ExitPrice)}${c.tp2Pnl != null ? ` · +${c.tp2Pnl}` : ""}`
-      : "",
-    c.stopLoss ?? "",
-    c.exitReason,
-    c.totalLotsUsed,
-    c.cyclePnl,
-    c.runningPnl,
-  ]);
+  return records.map((record, index) => cycleRecordToFlatRow(record, index + 1));
+}
+
+export const TRADE_RECORD_FLAT_HEADERS = [
+  "#",
+  "Date",
+  "Cycle",
+  "Trade Type",
+  "Side",
+  "Base Price",
+  "Trigger Price",
+  "Entry Time",
+  "Sensex Entry Price",
+  "Option Entry Strike",
+  "Entry Lots",
+  "AVG1 Time",
+  "AVG1 Price",
+  "AVG1 Strike",
+  "AVG2 Time",
+  "AVG2 Price",
+  "AVG2 Strike",
+  "AVG3 Time",
+  "AVG3 Price",
+  "AVG3 Strike",
+  "TP1 Time",
+  "TP1 Price",
+  "TP1 Lots",
+  "TP2 Time",
+  "TP2 Price",
+  "TP2 Lots",
+  "Stop Loss",
+  "Exit Time",
+  "Exit Price",
+  "Exit Reason",
+  "Total Lots",
+  "Cycle P&L",
+  "Running P&L",
+] as const;
+
+const TRADE_RECORD_EMPTY = "--";
+
+function tradeRecordCell(v: string | number | null | undefined): string {
+  if (v === null || v === undefined || v === "") return TRADE_RECORD_EMPTY;
+  if (typeof v === "number" && !Number.isFinite(v)) return TRADE_RECORD_EMPTY;
+  return String(v);
+}
+
+function tradeRecordPx(v: number | null | undefined): string {
+  if (v == null || !Number.isFinite(v)) return TRADE_RECORD_EMPTY;
+  return fmtPx(v);
+}
+
+function tradeRecordAvgCells(leg: CycleEntryLeg | null): [string, string, string] {
+  if (!leg) return [TRADE_RECORD_EMPTY, TRADE_RECORD_EMPTY, TRADE_RECORD_EMPTY];
+  return [tradeRecordCell(leg.time), tradeRecordPx(leg.indexPrice), tradeRecordCell(leg.strike)];
+}
+
+export function cycleRecordToFlatRow(record: CycleTradeRecord, rowNum: number): (string | number)[] {
+  const entry = record.initialEntry;
+  const avg1 = tradeRecordAvgCells(record.averaging[0] ?? null);
+  const avg2 = tradeRecordAvgCells(record.averaging[1] ?? null);
+  const avg3 = tradeRecordAvgCells(record.averaging[2] ?? null);
+
+  const tp1 = record.firstEntryTp1 ?? record.avgTp1Exits[0] ?? null;
+  const tp1Time = tp1?.time ?? record.tp1Time;
+  const tp1Price = tp1?.price ?? record.tp1Price;
+  const tp1Lots = tp1?.lots ?? (record.tp1ExitLots > 0 ? record.tp1ExitLots : null);
+
+  const tp2Lots =
+    record.tp2ExitPrice != null && record.totalLotsUsed > 0
+      ? Math.max(0, record.totalLotsUsed - record.tp1ExitLots)
+      : null;
+
+  return [
+    rowNum,
+    fmtDate(record.date),
+    record.cycleId,
+    record.cycleKind === "INITIAL" ? "Initial Trade" : "Re-entry Trade",
+    record.side,
+    tradeRecordPx(record.basePrice),
+    tradeRecordPx(record.triggerPrice),
+    tradeRecordCell(entry?.time),
+    tradeRecordPx(entry?.indexPrice),
+    tradeRecordCell(entry?.strike),
+    entry?.lots != null && entry.lots > 0 ? entry.lots : TRADE_RECORD_EMPTY,
+    avg1[0],
+    avg1[1],
+    avg1[2],
+    avg2[0],
+    avg2[1],
+    avg2[2],
+    avg3[0],
+    avg3[1],
+    avg3[2],
+    tradeRecordCell(tp1Time),
+    tradeRecordPx(tp1Price),
+    tp1Lots != null && tp1Lots > 0 ? tp1Lots : TRADE_RECORD_EMPTY,
+    tradeRecordCell(record.tp2Time),
+    tradeRecordPx(record.tp2ExitPrice),
+    tp2Lots != null && tp2Lots > 0 ? tp2Lots : TRADE_RECORD_EMPTY,
+    tradeRecordPx(record.stopLoss),
+    tradeRecordCell(record.tp2Time),
+    tradeRecordPx(record.tp2ExitPrice),
+    tradeRecordCell(record.exitReason),
+    record.totalLotsUsed > 0 ? record.totalLotsUsed : TRADE_RECORD_EMPTY,
+    record.cyclePnl,
+    record.runningPnl,
+  ];
 }
 
 export function buildTradeRecordsFromLog(log: Record<string, unknown>[]): TradeRecordRow[] {

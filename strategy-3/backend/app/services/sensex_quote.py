@@ -193,6 +193,10 @@ def fetch_sensex_live_quote(*, exchange_tokens: dict[str, list[str]], mode: str)
     Fetch SENSEX quote with LTP → OHLC close → disk last-price fallbacks.
     Attempts Angel token recovery once on invalid token.
     """
+    from app.services.angel_jwt_refresh import reload_angel_tokens_from_env
+
+    reload_angel_tokens_from_env()
+
     primary_mode = mode if mode in ("LTP", "OHLC", "FULL") else "LTP"
     modes_to_try = [primary_mode]
     if primary_mode == "LTP":

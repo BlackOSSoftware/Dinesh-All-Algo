@@ -3,9 +3,11 @@
 import { Play, Square } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { useEngineStatus } from "@/components/trader/app-shell";
+import { AngelTokenRefreshBanner } from "@/components/trader/angel-token-refresh";
 import { ConfirmModal } from "@/components/trader/ui/confirm-modal";
 import { CardTitle, PageHeader, PremiumCard } from "@/components/trader/ui/primitives";
 import { useStrategy4Dashboard } from "@/hooks/use-strategy4-dashboard";
+import { detectMcxQuotesTokenExpiry } from "@/lib/angel-session";
 import { setAlgoRunning, setTradingMode } from "@/lib/strategy4/api";
 import type { MarketQuote, TradingMode } from "@/lib/strategy4/types";
 import { cn } from "@/components/ui";
@@ -148,6 +150,7 @@ export function Strategy4DashboardView() {
   const activeTrades = serverOnline ? (data?.active_trades ?? []) : [];
   const completedTrades = serverOnline ? (data?.completed_trades ?? []) : [];
   const logs = serverOnline ? (data?.logs ?? []) : [];
+  const showAngelTokenRefresh = serverOnline && detectMcxQuotesTokenExpiry(quotes);
 
   async function toggleAlgo(enable: boolean) {
     setBusy(true);
@@ -187,6 +190,8 @@ export function Strategy4DashboardView() {
           Server offline — active trades, completed trades, and logs are hidden until the server is back.
         </p>
       ) : null}
+
+      <AngelTokenRefreshBanner show={showAngelTokenRefresh} />
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {quotes.map((quote) => (

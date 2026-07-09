@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { CardTitle, FieldLabel, FloatingField, PageHeader, PremiumCard } from "@/components/trader/ui/primitives";
 import { fetchSettings, saveSettings } from "@/lib/strategy2/api";
 import { SETTINGS_HELP } from "@/lib/settings-help";
+import { ExpirySideSelectors } from "@/components/strategy2/expiry-side-selectors";
 import { EMPTY_CONFIG, configFromApi, type MarketKey, type Strategy2Config } from "@/lib/strategy2/types";
 
 const MARKETS: { value: MarketKey; label: string }[] = [
@@ -188,29 +189,11 @@ export function Strategy2SettingsView() {
           />
         </div>
 
-        <div className="mt-4 border-t border-[var(--border-subtle)] pt-4">
-          <p className="mb-3 text-sm font-medium text-[var(--text-secondary)]">
-            <FieldLabel label="Grid Direction" help={SETTINGS_HELP.invertGrid} />
-          </p>
-          <button
-            type="button"
-            onClick={() => setCfg((c) => ({ ...c, invertGrid: !c.invertGrid }))}
-            className={`w-full rounded-xl border px-4 py-3 text-left text-sm transition ${
-              cfg.invertGrid
-                ? "border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)]"
-                : "border-[var(--border-subtle)] bg-[var(--surface-muted)] text-[var(--text-primary)] hover:border-[var(--accent)]"
-            }`}
-          >
-            <span className="font-medium">
-              {cfg.invertGrid ? "Opposite Grid — ON" : "Opposite Grid — OFF"}
-            </span>
-            <span className="mt-1 block text-xs text-[var(--text-muted)]">
-              {cfg.invertGrid
-                ? "Up = Buy / Down = Exit on upper levels · Down = Exit / Up = Add on lower levels"
-                : "Normal: Up = Exit / Down = Buy on upper · Down = Add / Up = Exit on lower"}
-            </span>
-          </button>
-        </div>
+        <ExpirySideSelectors
+          market={cfg.market}
+          cfg={cfg}
+          onChange={(patch) => setCfg((c) => ({ ...c, ...patch }))}
+        />
       </PremiumCard>
     </div>
   );

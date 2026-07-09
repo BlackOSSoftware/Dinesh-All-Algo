@@ -38,15 +38,14 @@ import {
 } from "@/lib/backtest-engine";
 import {
   buildNetBreakdown,
-  buildCycleTradeRecords,
-  cycleRecordsToExportRows,
+  cycleTableRowsToExportRows,
   defaultEntryLots,
   exportExcelBlob,
+  flattenLogToTableRows,
   normalizeEntryLots,
   fallbackDayDetails,
   mapDayDetails,
   mapDaySummary,
-  type CycleTradeRecord,
   type DayDetail,
   type DaySummaryRow,
 } from "@/lib/backtest-trend-analysis";
@@ -242,7 +241,6 @@ export function BacktestView() {
   const [chartDate, setChartDate] = useState("");
   const [stats, setStats] = useState<BacktestStats | null>(null);
   const [tradeLog, setTradeLog] = useState<Record<string, unknown>[]>([]);
-  const [cycleRecordsRaw, setCycleRecordsRaw] = useState<Record<string, unknown>[]>([]);
   const [equityCurve, setEquityCurve] = useState<{ date: string; equity: number; daily_pnl: number }[]>([]);
   const [drawdownCurve, setDrawdownCurve] = useState<{ date: string; drawdown: number }[]>([]);
   const [daysRun, setDaysRun] = useState(0);
@@ -267,10 +265,7 @@ export function BacktestView() {
   }, [patch]);
 
   const dayCount = useMemo(() => dateRange(fromDate, toDate).length, [fromDate, toDate]);
-  const cycleRecords = useMemo<CycleTradeRecord[]>(
-    () => buildCycleTradeRecords(tradeLog, cycleRecordsRaw),
-    [tradeLog, cycleRecordsRaw],
-  );
+  const tradeTableRows = useMemo(() => flattenLogToTableRows(tradeLog), [tradeLog]);
   const netBreakdown = useMemo(() => buildNetBreakdown(daySummaries, trades), [daySummaries, trades]);
 
   const chartDay = useMemo(() => {
@@ -333,7 +328,6 @@ export function BacktestView() {
     setChartDate("");
     setStats(null);
     setTradeLog([]);
-    setCycleRecordsRaw([]);
     setEquityCurve([]);
     setDrawdownCurve([]);
     setDaysRun(0);
@@ -415,7 +409,6 @@ export function BacktestView() {
       setChartDate(details[0]?.date ?? summaries[0]?.date ?? "");
       setStats(data.stats ?? null);
       setTradeLog(data.log ?? []);
-      setCycleRecordsRaw((data.cycle_records as Record<string, unknown>[] | undefined) ?? []);
       setEquityCurve(data.equity_curve ?? []);
       setDrawdownCurve(data.drawdown_curve ?? []);
       setDaysRun(data.days_count ?? 0);
@@ -435,8 +428,8 @@ export function BacktestView() {
 
   function exportCsv() {
     const cycleHeaders = [
-      "#", "Date", "Cycle", "Side", "Type", "Base", "Trigger", "Initial Entry", "Averaging Entries",
-      "First Entry TP1", "Avg TP1 Exits", "Final Exit", "SL", "Exit Reason", "Total Lots", "Cycle P&L", "Running",
+      "#", "Date", "Time", "Cycle", "Action", "Side", "Kind", "Base", "Trigger", "Strike", "Strike Type",
+      "Lots", "Total Lots", "TP1", "Adaptive H/L", "SL", "Exit", "Exit Reason", "Cycle P&L", "Running",
     ];
     const rows: unknown[][] = [
       ["BACKTEST REPORT"],
@@ -453,7 +446,7 @@ export function BacktestView() {
       [],
       ["TRADE RECORD"],
       cycleHeaders,
-      ...cycleRecordsToExportRows(cycleRecords),
+      ...cycleTableRowsToExportRows(tradeTableRows),
       [],
       ["CLOSED TRADES"],
       ["#", "Date", "Side", "Type", "Entry", "Exit", "Lots", "Reason", "Points"],
@@ -478,10 +471,10 @@ export function BacktestView() {
       {
         title: "TRADE RECORD",
         headers: [
-          "#", "Date", "Cycle", "Side", "Type", "Base", "Trigger", "Initial Entry", "Averaging Entries",
-          "First Entry TP1", "Avg TP1 Exits", "Final Exit", "SL", "Exit Reason", "Total Lots", "Cycle P&L", "Running",
+          "#", "Date", "Time", "Cycle", "Action", "Side", "Kind", "Base", "Trigger", "Strike", "Strike Type",
+          "Lots", "Total Lots", "TP1", "Adaptive H/L", "SL", "Exit", "Exit Reason", "Cycle P&L", "Running",
         ],
-        rows: cycleRecordsToExportRows(cycleRecords),
+        rows: cycleTableRowsToExportRows(tradeTableRows),
       },
       {
         title: "NET BREAKDOWN BY DAY",
@@ -718,7 +711,7 @@ export function BacktestView() {
               lossCount={stats?.losing_trades ?? 0}
             />
 
-            <TradeRecordSection cycleRecords={cycleRecords} onExportExcel={exportExcel} onExportCsv={exportCsv} />
+            <TradeRecordSection tableRows={tradeTableRows} onExportExcel={exportExcel} onExportCsv={exportCsv} />
           </div>
         ) : null}
       </div>

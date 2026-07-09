@@ -32,20 +32,26 @@ export function tokenFromRequest(request: Request): string | null {
 }
 
 export function setAuthCookie(response: NextResponse, token: string) {
+  const secure =
+    process.env.NODE_ENV === "production" &&
+    process.env.AUTH_COOKIE_SECURE === "true";
   response.cookies.set(AUTH_COOKIE, token, {
     httpOnly: true,
     sameSite: "lax",
-    secure: process.env.NODE_ENV === "production",
+    secure,
     path: "/",
     maxAge: 60 * 60 * 24 * 7,
   });
 }
 
 export function clearAuthCookie(response: NextResponse) {
+  const secure =
+    process.env.NODE_ENV === "production" &&
+    process.env.AUTH_COOKIE_SECURE === "true";
   response.cookies.set(AUTH_COOKIE, "", {
     httpOnly: true,
     sameSite: "lax",
-    secure: process.env.NODE_ENV === "production",
+    secure,
     path: "/",
     maxAge: 0,
   });

@@ -3,9 +3,11 @@
 import { Play, Square } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { useEngineStatus } from "@/components/trader/app-shell";
+import { AngelTokenRefreshBanner } from "@/components/trader/angel-token-refresh";
 import { ConfirmModal } from "@/components/trader/ui/confirm-modal";
 import { CardTitle, PageHeader, PremiumCard } from "@/components/trader/ui/primitives";
 import { useStrategy3Dashboard } from "@/hooks/use-strategy3-dashboard";
+import { detectSensexTokenExpiry } from "@/lib/angel-session";
 import { setAlgoRunning, setTradingMode } from "@/lib/strategy3/api";
 import type { TradingMode } from "@/lib/strategy3/types";
 import { cn } from "@/components/ui";
@@ -63,6 +65,15 @@ export function Strategy3DashboardView() {
   const activeTrades = serverOnline ? (snap?.active_trades ?? []) : [];
   const completedTrades = serverOnline ? (snap?.completed_trades ?? []) : [];
   const logs = serverOnline ? (snap?.logs ?? []) : [];
+  const showAngelTokenRefresh =
+    serverOnline &&
+    snap != null &&
+    detectSensexTokenExpiry({
+      sensex_market_open: snap.sensex_market_open,
+      sensex_source: snap.sensex_source,
+      sensex_error: snap.sensex_error,
+      sensex_price: snap.sensex_price,
+    });
 
   return (
     <div className="mx-auto max-w-6xl space-y-6 pb-10">
@@ -79,6 +90,8 @@ export function Strategy3DashboardView() {
           Server offline — active trades, completed trades, and logs are hidden until the server is back.
         </p>
       ) : null}
+
+      <AngelTokenRefreshBanner show={showAngelTokenRefresh} />
 
       <PremiumCard className="!p-4">
         <div className="flex items-center justify-between gap-2">

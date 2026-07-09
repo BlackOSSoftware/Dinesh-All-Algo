@@ -30,6 +30,7 @@ _last_fetch_mono: float = 0.0
 _last_results: list["QuoteResult"] = []
 _last_token_login_mono: float = 0.0
 _TOKEN_LOGIN_DEBOUNCE_SEC = 300.0
+_last_runtime_jwt: str = ""
 
 
 @dataclass
@@ -254,6 +255,15 @@ def _store_quote(key: str, price: float, source: str, market_open: bool, price_t
     _save_disk_ltp(key, price)
 
 
+def clear_mcx_quote_cache() -> None:
+    global _CACHE, _last_fetch_mono, _last_results, _last_runtime_jwt, _last_token_login_mono
+    _CACHE = {}
+    _last_fetch_mono = 0.0
+    _last_results = []
+    _last_runtime_jwt = (settings.angel_jwt_token or "").strip()
+    _last_token_login_mono = 0.0
+
+
 def _build_result(
     key: str,
     instrument: McxInstrument,
@@ -302,7 +312,14 @@ def _results_from_memory_cache(instruments: list[McxInstrument], now: float) -> 
 
 
 def _fetch_all_mcx_quotes_locked() -> list[QuoteResult]:
-    global _last_fetch_mono, _last_results
+    global _last_fetch_mono, _last_results, _last_runtime_jwt
+
+    from app.services.angel_jwt_refresh import reload_angel_tokens_from_env
+
+    changed = reload_angel_tokens_from_env()
+    current_jwt = (settings.angel_jwt_token or "").strip()
+    if changed or current_jwt != _last_runtime_jwt:
+        clear_mcx_quote_cache()
 
     instruments = list(load_mcx_instruments().values())
     if not instruments:

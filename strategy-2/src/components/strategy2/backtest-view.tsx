@@ -2,6 +2,7 @@
 
 import { Download, Loader2, Play } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { ExpirySideSelectors } from "@/components/strategy2/expiry-side-selectors";
 import { GridBacktestChart } from "@/components/strategy2/grid-backtest-chart";
 import { CardTitle, FloatingField, PageHeader, PremiumCard } from "@/components/trader/ui/primitives";
 import { runGridBacktest } from "@/lib/strategy2/api";
@@ -336,19 +337,14 @@ export function Strategy2BacktestView() {
             value={numInput(cfg.gridLevelsBelow)}
             onChange={(v) => setCfg((c) => ({ ...c, gridLevelsBelow: parseNum(v) }))}
           />
-          <div className="sm:col-span-2">
-            <button
-              type="button"
-              onClick={() => setCfg((c) => ({ ...c, invertGrid: !c.invertGrid }))}
-              className={`w-full rounded-xl border px-4 py-3 text-left text-sm transition ${
-                cfg.invertGrid
-                  ? "border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)]"
-                  : "border-[var(--border-subtle)] bg-[var(--surface-muted)] text-[var(--text-primary)]"
-              }`}
-            >
-              {cfg.invertGrid ? "Opposite Grid — ON" : "Opposite Grid — OFF"}
-            </button>
-          </div>
+          <ExpirySideSelectors
+            market={cfg.market}
+            cfg={cfg}
+            includeExpired
+            showActiveBanner={false}
+            hint="Backtest picks the buy or sell contract per day from the selected expiries. Grid resets when the mode changes."
+            onChange={(patch) => setCfg((c) => ({ ...c, ...patch }))}
+          />
         </div>
       </PremiumCard>
 

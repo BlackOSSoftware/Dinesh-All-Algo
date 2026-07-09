@@ -10,4 +10,10 @@ export const SETTINGS_HELP: Record<string, string> = {
   gridLevelsBelow: "How many buy/sell levels to place below the reference price.",
   lotsPerGrid: "How many lots to add or remove when price hits each grid level.",
   invertGrid: "Flip buy and sell rules. Use only if you want opposite grid behaviour.",
+  buySideMonth: "Calendar month for buy-side grid. Opposite grid stays OFF — normal buy grid runs.",
+  sellSideMonth: "Calendar month for short-sell grid. Opposite grid stays ON — inverted grid runs.",
+  buySideExpiry: "MCX futures contract for buy-side grid. Opposite grid OFF.",
+  sellSideExpiry: "MCX futures contract for short-sell grid. Opposite grid ON.",
+  expiryMonth1: "First contract month. Pick expiry, then choose buy or short-sell side.",
+  expiryMonth2: "Second contract month. Pick expiry, then choose buy or short-sell side.",
 };

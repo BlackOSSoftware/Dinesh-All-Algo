@@ -16,6 +16,7 @@ import { usePathname } from 'next/navigation';
 import { normalizeLegEntryMode, useAlgoRuntime } from '@/components/trader/app-shell';
 import { defaultEntryLots, normalizeEntryLots } from '@/lib/backtest-trend-analysis';
 import { getApiBase, getStoredToken } from '@/lib/auth';
+import { isAngelTokenErrorText, refreshAngelSession } from '@/lib/angel-session';
 
 type AngelRow = Record<string, unknown>;
 
@@ -182,13 +183,6 @@ function httpErrorDetail(data: Record<string, unknown>, fallback: string): strin
     if (typeof first.message === 'string') return first.message;
   }
   return fallback;
-}
-
-function isAngelTokenErrorText(s: string | null | undefined): boolean {
-  if (!s || !s.trim()) return false;
-  return /invalid\s*token|jwt\s*expired|token\s*expired|access\s*denied|ag8001|angel\s*one\s*not\s*configured|angel_jwt_token/i.test(
-    s,
-  );
 }
 
 function fmtInr(n: number | null | undefined, digits = 2): string {
@@ -890,43 +884,22 @@ function useTradingDashboardState() {
   }, [fetchStartBarClose]);
 
   const runAngelServerRefresh = useCallback(async () => {
-    const token = getStoredToken();
-    if (!token) return;
     setAngelRefreshBusy(true);
     setAngelRefreshFeedback(null);
     try {
-      const res = await fetch(`${getApiBase()}/angel/refresh-session`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      const data = (await res.json().catch(() => ({}))) as Record<string, unknown> & {
-        ok?: boolean;
-        message?: string;
-        error?: string;
-      };
-      if (res.status === 403) {
-        setAngelRefreshFeedback('Login required before refreshing Angel session.');
+      const result = await refreshAngelSession();
+      if (result.ok) {
+        setAngelRefreshFeedback(result.message ?? 'Angel session refreshed. Reloading…');
+        window.location.reload();
         return;
       }
-      if (data.ok === true) {
-        setAngelRefreshFeedback(
-          typeof data.message === 'string' ? data.message : 'Angel session refreshed.'
-        );
-        setAngelTokenExpired(false);
-        setAngelErr(null);
-        await fetchAngel();
-        await fetchStartBarClose();
-      } else {
-        setAngelRefreshFeedback(
-          typeof data.error === 'string' ? data.error : `Request failed (HTTP ${res.status})`
-        );
-      }
+      setAngelRefreshFeedback(result.error ?? 'Token refresh failed.');
     } catch {
       setAngelRefreshFeedback('Network error while refreshing Angel session.');
     } finally {
       setAngelRefreshBusy(false);
     }
-  }, [fetchAngel, fetchStartBarClose]);
+  }, []);
 
   const showAngelServerRefresh =
     angelTokenExpired ||

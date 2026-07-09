@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -32,6 +33,8 @@ LOG = logging.getLogger(__name__)
 
 _TASK: asyncio.Task | None = None
 _STOP = asyncio.Event()
+_REF_FETCH_AT: dict[str, float] = {}
+_TICK_PRICE: dict[int, tuple[str, float, float]] = {}
 
 
 def _ist_now() -> datetime:
@@ -112,21 +115,28 @@ def _ensure_daily_session(cfg: dict[str, Any], runtime: dict[str, Any]) -> dict[
 
 
 def _maybe_set_reference(db, user_id: int, cfg: dict[str, Any], runtime: dict[str, Any], parsed: dict[str, Any], instrument) -> dict[str, Any]:
-    rt = deepcopy(runtime)
-    phase = str(rt.get("phase") or "")
-    if phase not in ("IDLE", "WAIT_REF", "WAIT_BREAKOUT") or _num(rt.get("referencePrice")) > 0:
-        return rt
+    if _num(runtime.get("referencePrice")) > 0:
+        return runtime
+
+    phase = str(runtime.get("phase") or "")
+    if phase not in ("IDLE", "WAIT_REF", "WAIT_BREAKOUT"):
+        return runtime
 
     now = _ist_now()
     sh, sm = _parse_hhmm(parsed["start_time"])
-    ref_end = now.replace(hour=sh, minute=sm, second=0, microsecond=0) + timedelta(minutes=1)
-    if now < ref_end:
+    if now < now.replace(hour=sh, minute=sm, second=0, microsecond=0) + timedelta(minutes=1):
+        rt = copy.copy(runtime)
         rt["phase"] = "WAIT_REF"
         rt["message"] = f"Waiting for reference candle at {parsed['start_time']}"
         return rt
 
     if not instrument or not instrument.configured:
-        return rt
+        return runtime
+
+    key = f"{user_id}:{_session_date()}"
+    if time.monotonic() - _REF_FETCH_AT.get(key, 0) < 45:
+        return runtime
+    _REF_FETCH_AT[key] = time.monotonic()
 
     try:
         candles = _fetch_day_candles(
@@ -138,7 +148,7 @@ def _maybe_set_reference(db, user_id: int, cfg: dict[str, Any], runtime: dict[st
         )
         ref = find_reference_candle(candles, parsed["start_time"])
         if ref:
-            rt = set_reference_from_candle(rt, ref, parsed)
+            rt = set_reference_from_candle(runtime, ref, parsed)
             tr.append_trading_log(
                 db,
                 user_id=user_id,
@@ -149,10 +159,13 @@ def _maybe_set_reference(db, user_id: int, cfg: dict[str, Any], runtime: dict[st
                 entry_price=_num(ref.get("close")),
                 message=str(rt.get("message") or "")[:900],
             )
+            return rt
     except Exception as exc:  # noqa: BLE001
         LOG.warning("Reference candle fetch failed: %s", exc)
+        rt = copy.copy(runtime)
         rt["message"] = f"Reference fetch failed: {exc}"
-    return rt
+        return rt
+    return runtime
 
 
 def _num(v: Any, default: float = 0.0) -> float:
@@ -223,25 +236,31 @@ def process_user_tick(db, user_id: int) -> None:
     price = float(quote.price if quote else 0)
     runtime = load_runtime(cfg)
     runtime = _ensure_daily_session(cfg, runtime)
+
+    cached = _TICK_PRICE.get(user_id)
+    today = _session_date()
+    if cached and cached[0] == today:
+        runtime["prevPrice"] = cached[1]
+        runtime["lastPrice"] = cached[2]
+
     runtime = _maybe_set_reference(db, user_id, cfg, runtime, parsed, instrument)
 
     if price <= 0:
         price = float(runtime.get("lastPrice") or 0)
     mode = (row.trading_mode or "PAPER").upper()
     if price <= 0:
-        cfg["breakout_runtime"] = runtime
-        tr.save_strategy_settings(db, user_id, config=cfg)
         return
 
     prev_runtime = copy.deepcopy(runtime)
     runtime, actions = process_price_tick(cfg, runtime, price)
+    _TICK_PRICE[user_id] = (today, float(runtime.get("prevPrice") or price), float(runtime.get("lastPrice") or price))
 
     live_failed = False
     kept_actions: list[dict[str, Any]] = []
 
     for act in actions:
         lots = int(act.get("lots") or 0)
-        fill = float(act.get("fillPrice") or 0)
+        fill = float(act.get("fillPrice") or price)
         if mode == "LIVE" and lots > 0:
             ready, reason = _live_trading_ready(instrument)
             if not ready:
@@ -257,9 +276,11 @@ def process_user_tick(db, user_id: int) -> None:
                 live_failed = True
                 break
 
-            tx = "BUY" if "SELL" not in str(act.get("action")) or str(act.get("action")).endswith("_SELL") else "SELL"
-            if str(act.get("action")).startswith("EXIT_"):
+            act_name = str(act.get("action") or "")
+            if act_name.startswith("EXIT_"):
                 tx = "SELL" if act.get("side") == "BUY" else "BUY"
+            else:
+                tx = str(act.get("side") or "BUY")
             try:
                 raw = angel_orders.place_order(
                     exchange=instrument.exchange,
@@ -269,7 +290,7 @@ def process_user_tick(db, user_id: int) -> None:
                     quantity=lots * int(instrument.lotsize or 1),
                     product_type="CARRYFORWARD",
                     order_type="MARKET",
-                    headers=_angel_order_headers(),
+                    **_angel_order_headers(),
                 )
                 order_id, ok, broker_msg = _extract_order_ack(raw)
                 if not order_id and not ok:
@@ -322,8 +343,11 @@ def process_user_tick(db, user_id: int) -> None:
         for act in kept_actions:
             _sync_position(db, user_id=user_id, instrument=instrument, mode=mode, action=act, mark_price=price)
 
-    cfg["breakout_runtime"] = runtime
-    tr.save_strategy_settings(db, user_id, config=cfg)
+    persist = bool(actions) or runtime.get("phase") != prev_runtime.get("phase")
+    persist = persist or _num(runtime.get("referencePrice")) != _num(prev_runtime.get("referencePrice"))
+    if persist or live_failed:
+        cfg["breakout_runtime"] = runtime
+        tr.save_strategy_settings(db, user_id, config=cfg)
 
 
 async def _engine_loop() -> None:

@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.config import settings
-from app.services.mcx_scrip_resolver import resolve_mcx_instrument
+from app.services.mcx_scrip_resolver import resolve_mcx_instrument, resolve_mcx_instrument_for_expiry
 
 LOG = logging.getLogger(__name__)
 
@@ -152,8 +152,20 @@ def load_mcx_instruments() -> dict[str, McxInstrument]:
     return out
 
 
-def get_instrument(key: str | None) -> McxInstrument | None:
+def get_instrument(key: str | None, *, expiry_iso: str | None = None) -> McxInstrument | None:
     k = (key or "").strip().upper()
     if not k:
         return None
+    expiry = (expiry_iso or "").strip()[:10]
+    if expiry:
+        resolved = resolve_mcx_instrument_for_expiry(k, expiry)
+        if resolved:
+            return McxInstrument(
+                key=k,
+                label=str(resolved.get("label") or k.replace("_", " ").title()),
+                exchange=str(resolved.get("exchange") or "MCX"),
+                token=str(resolved.get("token") or ""),
+                tradingsymbol=str(resolved.get("tradingsymbol") or ""),
+                lotsize=max(1, int(resolved.get("lotsize") or 1)),
+            )
     return load_mcx_instruments().get(k)

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -20,6 +21,7 @@ from app.schemas import (
     GridBacktestRunIn,
     GridLevelOut,
     MarketQuoteOut,
+    McxExpiryOut,
     OrderCancelBody,
     OrderModifyBody,
     TradingLogOut,
@@ -36,9 +38,17 @@ from app.services.grid_logic import (
 )
 from app.services.grid_backtest import run_grid_backtest
 from app.services.mcx_quotes import fetch_all_mcx_quotes, get_quote_by_key, quote_from_results
+from app.services.mcx_scrip_resolver import list_mcx_future_expiries
 from app.services.trading_engine import _angel_headers, manual_close_leg
 
 router = APIRouter(prefix="/trading", tags=["trading"])
+
+
+def _ist_now() -> datetime:
+    try:
+        return datetime.now(ZoneInfo("Asia/Kolkata"))
+    except ZoneInfoNotFoundError:
+        return datetime.now(timezone(timedelta(hours=5, minutes=30)))
 
 
 def _iso(dt: Any) -> str | None:
@@ -138,11 +148,36 @@ def put_trading_settings(
     return TradingSettingsOut(config=cfg, algo_running=new_run, trading_mode=new_mode)
 
 
+@router.get("/mcx-expiries", response_model=list[McxExpiryOut])
+def list_mcx_expiries(
+    market: str = Query(..., description="MCX market key e.g. CRUDE_OIL"),
+    include_expired: bool = Query(False, alias="includeExpired"),
+    user: User = Depends(get_current_user),
+):
+    del user
+    from app.services.angel_jwt_refresh import reload_angel_tokens_from_env
+
+    reload_angel_tokens_from_env()
+    if not settings.angel_api_key.strip() or not settings.angel_jwt_token.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Angel One JWT not configured. Use Generate Token on the dashboard first.",
+        )
+    rows = list_mcx_future_expiries(market, include_expired=include_expired)
+    if not rows:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No MCX futures expiries found for {market.upper()}. Check Angel login or try another symbol.",
+        )
+    return [McxExpiryOut(**row) for row in rows]
+
+
 @router.get("/dashboard", response_model=DashboardOut)
 def get_dashboard(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     row = tr.get_or_create_strategy_settings(db, user.id)
     cfg = tr.load_config_dict(db, user.id)
-    parsed = parse_strategy_config(cfg)
+    now = _ist_now()
+    parsed = parse_strategy_config(cfg, as_of=now)
     runtime = load_runtime(cfg)
 
     quotes_raw = fetch_all_mcx_quotes()

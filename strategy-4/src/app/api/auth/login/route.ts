@@ -1,3 +1,4 @@
+import "@/server/env";
 import { NextResponse } from "next/server";
 import { backendUrl, proxyToBackend } from "@/server/backend-proxy";
 import { setAuthCookie } from "@/lib/auth";

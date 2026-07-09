@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date, datetime
 from typing import Any, Literal
 
 
@@ -34,9 +35,82 @@ def _int(v: Any, default: int = 0) -> int:
         return default
 
 
-def parse_strategy_config(cfg: dict[str, Any]) -> dict[str, Any]:
+def _month_from_as_of(as_of: date | datetime | str | None) -> int | None:
+    if as_of is None:
+        return None
+    if isinstance(as_of, datetime):
+        return as_of.month
+    if isinstance(as_of, date):
+        return as_of.month
+    text = str(as_of).strip()
+    if len(text) >= 7 and text[4] == "-":
+        try:
+            return int(text[5:7])
+        except ValueError:
+            return None
+    return None
+
+
+def _month_year_from_as_of(as_of: date | datetime | str | None) -> tuple[int, int] | None:
+    if as_of is None:
+        return None
+    if isinstance(as_of, datetime):
+        return as_of.month, as_of.year
+    if isinstance(as_of, date):
+        return as_of.month, as_of.year
+    text = str(as_of).strip()[:10]
+    if len(text) == 10 and text[4] == "-":
+        try:
+            dt = datetime.strptime(text, "%Y-%m-%d")
+            return dt.month, dt.year
+        except ValueError:
+            return None
+    return None
+
+
+def _month_year_from_expiry_iso(expiry: str) -> tuple[int, int] | None:
+    text = (expiry or "").strip()[:10]
+    if len(text) != 10 or text[4] != "-":
+        return None
+    try:
+        dt = datetime.strptime(text, "%Y-%m-%d")
+        return dt.month, dt.year
+    except ValueError:
+        return None
+
+
+def resolve_invert_grid(cfg: dict[str, Any], *, as_of: date | datetime | str | None = None) -> bool:
+    """Buy-side expiry month: normal buy grid (opposite OFF). Sell-side expiry month: short grid (opposite ON)."""
+    my = _month_year_from_as_of(as_of)
+    if my is not None:
+        buy_my = _month_year_from_expiry_iso(str(cfg.get("buySideExpiry") or ""))
+        sell_my = _month_year_from_expiry_iso(str(cfg.get("sellSideExpiry") or ""))
+        if buy_my and my == buy_my:
+            return False
+        if sell_my and my == sell_my:
+            return True
+        buy_month = _int(cfg.get("buySideMonth"), 0)
+        sell_month = _int(cfg.get("sellSideMonth"), 0)
+        if buy_month > 0 and my[0] == buy_month:
+            return False
+        if sell_month > 0 and my[0] == sell_month:
+            return True
     invert_raw = cfg.get("invertGrid")
-    invert_grid = invert_raw is True or str(invert_raw).lower() in ("1", "true", "yes")
+    return invert_raw is True or str(invert_raw).lower() in ("1", "true", "yes")
+
+
+def resolve_active_expiry(cfg: dict[str, Any], *, as_of: date | datetime | str | None = None) -> str:
+    if resolve_invert_grid(cfg, as_of=as_of):
+        return str(cfg.get("sellSideExpiry") or "").strip()[:10]
+    return str(cfg.get("buySideExpiry") or "").strip()[:10]
+
+
+def config_with_invert_for_date(cfg: dict[str, Any], as_of: date | datetime | str | None) -> dict[str, Any]:
+    return {**cfg, "invertGrid": resolve_invert_grid(cfg, as_of=as_of)}
+
+
+def parse_strategy_config(cfg: dict[str, Any], *, as_of: date | datetime | str | None = None) -> dict[str, Any]:
+    invert_grid = resolve_invert_grid(cfg, as_of=as_of)
     return {
         "start_time": str(cfg.get("startTime") or "09:00"),
         "end_time": str(cfg.get("endTime") or "23:30"),

@@ -818,14 +818,17 @@ def dashboard_snapshot_fields(runtime: dict[str, Any]) -> dict[str, Any]:
 
 
 def process_price_tick(cfg: dict[str, Any], runtime: dict[str, Any], price: float) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Live LTP tick — detect breakout / TP / SL crosses."""
+    """Live LTP tick — detect breakout / TP / SL crosses at market price."""
     parsed = parse_strategy_config(cfg)
     rt = deepcopy(runtime)
     actions: list[dict[str, Any]] = []
     if price <= 0:
         return rt, actions
 
-    prev = _num(rt.get("prevPrice")) or _num(rt.get("lastPrice")) or price
+    prev = _num(rt.get("prevPrice"))
+    if prev <= 0:
+        prev = _num(rt.get("lastPrice")) or price
+    lo, hi = (min(prev, price), max(prev, price))
     rt["prevPrice"] = round(price, 4)
     rt["lastPrice"] = round(price, 4)
     phase = str(rt.get("phase") or "IDLE")
@@ -838,23 +841,15 @@ def process_price_tick(cfg: dict[str, Any], runtime: dict[str, Any], price: floa
         sell_trig = _num(rt.get("sellTrigger"))
         ref = _num(rt.get("referencePrice"))
         side: Side | None = None
-        fill = 0.0
-        if prev < buy_trig <= price + 1e-9:
-            side, fill = "BUY", buy_trig
-        elif prev > buy_trig and price >= buy_trig - 1e-9:
-            side, fill = "BUY", buy_trig
-        elif prev > sell_trig >= price - 1e-9:
-            side, fill = "SELL", sell_trig
-        elif prev < sell_trig and price <= sell_trig + 1e-9:
-            side, fill = "SELL", sell_trig
-        elif price >= buy_trig - 1e-9 and price <= sell_trig + 1e-9:
-            pass
-        elif ref > 0 and price >= buy_trig - 1e-9:
-            side, fill = "BUY", buy_trig
-        elif ref > 0 and price <= sell_trig + 1e-9:
-            side, fill = "SELL", sell_trig
+        if buy_trig > 0 and sell_trig > 0:
+            if hi >= buy_trig - 1e-9 and lo <= sell_trig + 1e-9:
+                side = "SELL" if ref > 0 and prev <= ref else "BUY"
+            elif hi >= buy_trig - 1e-9:
+                side = "BUY"
+            elif lo <= sell_trig + 1e-9:
+                side = "SELL"
         if side:
-            rt, entry_action = _open_entry(side=side, fill=fill, parsed=parsed, rt=rt, is_reverse=False)
+            rt, entry_action = _open_entry(side=side, fill=round(price, 4), parsed=parsed, rt=rt, is_reverse=False)
             actions.append(entry_action)
             phase = str(rt.get("phase"))
 
@@ -863,24 +858,23 @@ def process_price_tick(cfg: dict[str, Any], runtime: dict[str, Any], price: floa
         tp = _num(rt.get("tpPrice"))
         sl = _num(rt.get("slPrice"))
         exit_reason: str | None = None
-        exit_px = 0.0
         if side == "BUY":
-            if prev > sl >= price - 1e-9 or price <= sl + 1e-9:
-                exit_reason, exit_px = "SL", sl
-            elif prev < tp <= price + 1e-9 or price >= tp - 1e-9:
-                exit_reason, exit_px = "TP", tp
+            if lo <= sl + 1e-9:
+                exit_reason = "SL"
+            elif hi >= tp - 1e-9:
+                exit_reason = "TP"
         else:
-            if prev < sl <= price + 1e-9 or price >= sl - 1e-9:
-                exit_reason, exit_px = "SL", sl
-            elif prev > tp >= price - 1e-9 or price <= tp + 1e-9:
-                exit_reason, exit_px = "TP", tp
+            if hi >= sl - 1e-9:
+                exit_reason = "SL"
+            elif lo <= tp + 1e-9:
+                exit_reason = "TP"
         if exit_reason:
             allow_rev = exit_reason == "SL" and phase == "IN_TRADE"
             rt, exit_actions = _close_position(
                 rt=rt,
                 parsed=parsed,
                 reason=exit_reason,
-                exit_px=exit_px,
+                exit_px=round(price, 4),
                 allow_reverse=allow_rev,
             )
             actions.extend(exit_actions)
