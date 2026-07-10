@@ -2,32 +2,63 @@ $ErrorActionPreference = "Stop"
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $root
 
+$StrategyName = "Strategy 4"
 $FrontendUrl = "http://localhost:3003"
-$ChromeProfileName = "indian-algo-strategy-4"
-$ChromeProfileDir = Join-Path $env:TEMP $ChromeProfileName
+$FrontendPort = 3003
+$BackendPort = 8003
+$ChromeProfileDir = Join-Path $env:TEMP "indian-algo-all-strategies"
+
+function Stop-PidTree {
+    param([Parameter(Mandatory = $true)][int]$ProcId)
+    if ($ProcId -le 0) { return }
+    # Use cmd so taskkill stderr ("process not found") never becomes a terminating PowerShell error.
+    cmd.exe /c "taskkill /PID $ProcId /T /F >nul 2>&1" | Out-Null
+}
+
+function Clear-ListenPort {
+    param([Parameter(Mandatory = $true)][int]$Port)
+    $conns = @()
+    try {
+        $conns = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
+    } catch {
+        $conns = @()
+    }
+    $pids = @(
+        $conns |
+            ForEach-Object { [int]$_.OwningProcess } |
+            Where-Object { $_ -gt 0 } |
+            Select-Object -Unique
+    )
+    foreach ($procId in $pids) {
+        Write-Host "  Freeing port $Port (PID $procId)..." -ForegroundColor DarkYellow
+        Stop-PidTree -ProcId $procId
+    }
+}
 
 function Start-ManagedProcess {
     param(
-        [Parameter(Mandatory=$true)][string]$Name,
-        [Parameter(Mandatory=$true)][string]$Command
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$Command
     )
-
-    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = "cmd.exe"
     $psi.Arguments = "/d /s /c `"$Command`""
     $psi.WorkingDirectory = $root
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $false
-
     $process = [System.Diagnostics.Process]::Start($psi)
-    [pscustomobject]@{ Name = $Name; Process = $process }
+    return [pscustomobject]@{ Name = $Name; Process = $process }
 }
 
 function Stop-ProcessTree {
-    param([System.Diagnostics.Process]$Process)
-
-    if ($null -ne $Process -and -not $Process.HasExited) {
-        taskkill.exe /PID $Process.Id /T /F | Out-Null
+    param($Process)
+    if ($null -eq $Process) { return }
+    try {
+        if (-not $Process.HasExited) {
+            Stop-PidTree -ProcId ([int]$Process.Id)
+        }
+    } catch {
+        # already gone
     }
 }
 
@@ -43,37 +74,30 @@ function Get-ChromePath {
     return $null
 }
 
-function Start-ChromeApp {
-    param([Parameter(Mandatory=$true)][string]$Url)
-
+function Open-StrategyInChrome {
+    param([Parameter(Mandatory = $true)][string]$Url)
     $chrome = Get-ChromePath
     if (-not $chrome) {
         Write-Host "Chrome not found. Open $Url manually." -ForegroundColor DarkYellow
-        return $null
+        return
     }
-
-    $psi = [System.Diagnostics.ProcessStartInfo]::new()
-    $psi.FileName = $chrome
-    $psi.Arguments = "--new-window `"$Url`" --user-data-dir=`"$ChromeProfileDir`" --no-first-run --no-default-browser-check"
-    $psi.UseShellExecute = $false
-    return [System.Diagnostics.Process]::Start($psi)
-}
-
-function Stop-ChromeProfile {
-    $escaped = [Regex]::Escape($ChromeProfileDir)
-    Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -match $escaped } |
-        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    $argLine = '--user-data-dir="' + $ChromeProfileDir + '" --no-first-run --no-default-browser-check ' + $Url
+    Start-Process -FilePath $chrome -ArgumentList $argLine | Out-Null
 }
 
 $children = @()
 
 try {
-    Write-Host "Strategy 4 - starting backend + frontend" -ForegroundColor Cyan
+    Write-Host "$StrategyName - starting backend + frontend" -ForegroundColor Cyan
     Write-Host "Frontend: $FrontendUrl"
-    Write-Host "Backend : http://127.0.0.1:8003"
+    Write-Host "Backend : http://127.0.0.1:$BackendPort"
     Write-Host "Login   : admin / admin"
     Write-Host ""
+
+    Write-Host "Stopping any previous $StrategyName instance on ports $FrontendPort / $BackendPort..." -ForegroundColor Yellow
+    Clear-ListenPort -Port $FrontendPort
+    Clear-ListenPort -Port $BackendPort
+    Start-Sleep -Seconds 2
 
     $children += Start-ManagedProcess -Name "Backend" -Command "npm run worker"
     Start-Sleep -Seconds 3
@@ -100,39 +124,33 @@ try {
     $children += Start-ManagedProcess -Name "Frontend" -Command "npm run start"
     Start-Sleep -Seconds 4
 
-    $chrome = Start-ChromeApp -Url $FrontendUrl
-    if ($null -ne $chrome) {
-        $children += [pscustomobject]@{ Name = "ChromeLauncher"; Process = $chrome }
-        Write-Host "Opened Chrome window: $FrontendUrl" -ForegroundColor Green
-    }
+    Open-StrategyInChrome -Url $FrontendUrl
+    Write-Host "Opened in shared Chrome window: $FrontendUrl" -ForegroundColor Green
 
-    Write-Host "Started. Press ENTER in this window to stop backend, frontend, and Chrome." -ForegroundColor Green
-    Write-Host "Closing this CMD window will also close all processes."
+    Write-Host "Started. Press ENTER to stop backend + frontend (Chrome stays open)." -ForegroundColor Green
+    Write-Host "Re-run this CMD anytime - old ports are freed automatically."
 
     while ($true) {
         foreach ($child in $children) {
-            if ($child.Name -eq "ChromeLauncher") { continue }
             if ($child.Process.HasExited) {
-                throw "$($child.Name) exited with code $($child.Process.ExitCode)."
+                Write-Host "$($child.Name) stopped (exit $($child.Process.ExitCode))." -ForegroundColor DarkYellow
+                return
             }
         }
-
         if ([Console]::KeyAvailable) {
             $key = [Console]::ReadKey($true)
-            if ($key.Key -eq "Enter") {
-                break
-            }
+            if ($key.Key -eq "Enter") { break }
         }
-
         Start-Sleep -Milliseconds 500
     }
 }
 finally {
     Write-Host ""
-    Write-Host "Stopping Strategy 4 backend, frontend, and Chrome..." -ForegroundColor Yellow
+    Write-Host "Stopping $StrategyName backend + frontend..." -ForegroundColor Yellow
     foreach ($child in $children) {
         Stop-ProcessTree -Process $child.Process
     }
-    Stop-ChromeProfile
-    Write-Host "Stopped." -ForegroundColor Green
+    try { Clear-ListenPort -Port $FrontendPort } catch { }
+    try { Clear-ListenPort -Port $BackendPort } catch { }
+    Write-Host "Stopped. Chrome left open (shared with other strategies)." -ForegroundColor Green
 }

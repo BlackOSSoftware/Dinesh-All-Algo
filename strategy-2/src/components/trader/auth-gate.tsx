@@ -40,9 +40,14 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
 
       try {
         const res = await fetch("/api/auth/session", { cache: "no-store", credentials: "same-origin" });
-        const data = (await res.json()) as { authenticated?: boolean };
+        const data = (await res.json()) as { authenticated?: boolean; access_token?: string };
         if (!alive) return;
-        setState(data.authenticated ? "authenticated" : "guest");
+        if (data.authenticated) {
+          if (data.access_token) setStoredToken(data.access_token);
+          setState("authenticated");
+        } else {
+          setState("guest");
+        }
       } catch {
         if (alive) setState("guest");
       }

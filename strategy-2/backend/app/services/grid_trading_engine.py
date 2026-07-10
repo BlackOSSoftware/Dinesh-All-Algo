@@ -211,6 +211,7 @@ def _create_open_leg(
         db.add(row)
         db.commit()
         return
+    now = datetime.now(timezone.utc)
     db.add(
         TradePosition(
             user_id=user_id,
@@ -222,6 +223,7 @@ def _create_open_leg(
             lots=lots,
             quantity=qty,
             entry_price=entry_px,
+            entry_time=now,
             status="OPEN",
             exchange=instrument.exchange,
             trading_symbol=instrument.tradingsymbol,
@@ -253,6 +255,7 @@ def _close_open_leg(
     entry = float(row.entry_price or entry_px_hint or exit_px)
     close_qty = close_lots * instrument.lotsize
     pnl = _position_pnl(entry, exit_px, close_qty)
+    now = datetime.now(timezone.utc)
     if close_lots >= int(row.lots or 0):
         tr.close_position(db, row, exit_price=exit_px, exit_reason=exit_reason, pnl=pnl)
         return
@@ -269,8 +272,9 @@ def _close_open_leg(
         lots=close_lots,
         quantity=close_qty,
         entry_price=entry,
+        entry_time=row.entry_time or now,
         exit_price=exit_px,
-        exit_time=datetime.now(timezone.utc),
+        exit_time=now,
         exit_reason=exit_reason[:64],
         pnl=pnl,
         status="CLOSED",
@@ -298,6 +302,9 @@ def _record_upper_exit(
         return
     qty = lots * instrument.lotsize
     pnl = _position_pnl(entry_px, exit_px, qty)
+    base = tr.get_open_position_by_leg(db, user_id, "BASE")
+    now = datetime.now(timezone.utc)
+    entry_time = (base.entry_time if base and base.entry_time else now)
     db.add(
         TradePosition(
             user_id=user_id,
@@ -309,8 +316,9 @@ def _record_upper_exit(
             lots=lots,
             quantity=qty,
             entry_price=entry_px,
+            entry_time=entry_time,
             exit_price=exit_px,
-            exit_time=datetime.now(timezone.utc),
+            exit_time=now,
             exit_reason="EXIT",
             pnl=pnl,
             status="CLOSED",
@@ -319,7 +327,6 @@ def _record_upper_exit(
             symbol_token=instrument.token,
         )
     )
-    base = tr.get_open_position_by_leg(db, user_id, "BASE")
     if base:
         reduce_qty = lots * instrument.lotsize
         if int(base.lots or 0) <= lots:
@@ -469,8 +476,8 @@ def process_user_tick(db, user_id: int) -> None:
     cfg = tr.load_config_dict(db, user_id)
     now = _ist_now()
     effective_invert = resolve_invert_grid(cfg, as_of=now)
-    cfg = {**cfg, "invertGrid": effective_invert}
-    parsed = parse_strategy_config(cfg, as_of=now)
+    tick_cfg = {**cfg, "invertGrid": effective_invert}
+    parsed = parse_strategy_config(tick_cfg, as_of=now)
     if parsed["reference_price"] <= 0 or parsed["grid_gap"] <= 0:
         return
 
@@ -495,12 +502,22 @@ def process_user_tick(db, user_id: int) -> None:
 
     runtime = load_runtime(cfg)
     prev_invert = runtime.get("effectiveInvertGrid")
+    # Do not wipe an open grid when month/invert flips — keep current mode until flat/restart.
     if prev_invert is not None and bool(prev_invert) != effective_invert:
-        runtime = default_runtime()
+        if int(runtime.get("positionLots") or 0) > 0 or bool(runtime.get("baseEntered")):
+            effective_invert = bool(prev_invert)
+            tick_cfg = {**cfg, "invertGrid": effective_invert}
+        else:
+            frozen_ref = float(runtime.get("sessionReferencePrice") or parsed["reference_price"] or 0)
+            runtime = default_runtime()
+            if frozen_ref > 0:
+                runtime["sessionReferencePrice"] = frozen_ref
     runtime["effectiveInvertGrid"] = effective_invert
+    if float(runtime.get("sessionReferencePrice") or 0) <= 0 and parsed["reference_price"] > 0:
+        runtime["sessionReferencePrice"] = parsed["reference_price"]
     runtime = seed_runtime_market_price(runtime, price)
     prev_runtime = copy.deepcopy(runtime)
-    runtime, actions = process_price_tick({**cfg, "grid_runtime": runtime}, runtime, price)
+    runtime, actions = process_price_tick({**tick_cfg, "grid_runtime": runtime}, runtime, price)
 
     kept_actions: list[dict[str, Any]] = []
     live_failed = False
@@ -533,6 +550,8 @@ def process_user_tick(db, user_id: int) -> None:
                 break
 
         kept_actions.append(act)
+        # Log per-fill PnL delta when available (not cumulative runtime total).
+        fill_pnl = float(act.get("realizedPnl") or 0)
         tr.append_trading_log(
             db,
             user_id=user_id,
@@ -543,7 +562,7 @@ def process_user_tick(db, user_id: int) -> None:
             quantity=lots * instrument.lotsize,
             entry_price=fill_px if int(act.get("lotsDelta") or 0) > 0 else None,
             exit_price=fill_px if int(act.get("lotsDelta") or 0) < 0 else None,
-            pnl=float(act.get("realizedPnl") or 0),
+            pnl=fill_pnl,
             message=log_msg,
         )
 
@@ -551,8 +570,10 @@ def process_user_tick(db, user_id: int) -> None:
         runtime = prev_runtime
         kept_actions = []
     else:
-        cfg["grid_runtime"] = runtime
-        tr.save_strategy_settings(db, user_id, config=cfg)
+        # Persist only runtime — never overwrite settings fields mid-tick (avoids ref race).
+        latest = tr.load_config_dict(db, user_id)
+        latest["grid_runtime"] = runtime
+        tr.save_strategy_settings(db, user_id, config=latest)
         _sync_positions_for_actions(
             db,
             user_id=user_id,

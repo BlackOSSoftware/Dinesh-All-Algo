@@ -43,16 +43,13 @@ function SideToggle({
           key={side}
           type="button"
           onClick={() => onChange(side)}
-          className={`rounded-xl border px-3 py-2.5 text-left text-sm transition ${
+          className={`rounded-xl border px-3 py-2.5 text-center text-sm font-medium transition ${
             value === side
               ? "border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)]"
               : "border-[var(--border-subtle)] bg-[var(--surface-muted)] text-[var(--text-primary)] hover:border-[var(--accent)]"
           }`}
         >
-          <span className="font-medium">{side === "buy" ? "Buy Side" : "Short Sell"}</span>
-          <span className="mt-0.5 block text-xs opacity-80">
-            {side === "buy" ? "Opposite OFF · normal buy grid" : "Opposite ON · short-sell grid"}
-          </span>
+          {side === "buy" ? "Buy Side" : "Short Sell"}
         </button>
       ))}
     </div>
@@ -98,7 +95,7 @@ function MonthSlot({
         </select>
       </label>
       <div className="space-y-2">
-        <FieldLabel label="Use for" help={help} />
+        <FieldLabel label="This month runs as" help={help} />
         <SideToggle value={side} onChange={onSideChange} />
       </div>
     </div>
@@ -237,16 +234,16 @@ export function ExpirySideSelectors({
           }`}
         >
           <span className="font-medium">
-            Active now: {activeInvert ? "Short Sell · Opposite ON" : "Buy Side · Opposite OFF"}
+            Active now: {activeInvert ? "Short Sell" : "Buy Side"}
           </span>
           <span className="mt-1 block text-xs opacity-80">
             {activeInvert
               ? sellRow
-                ? `${sellRow.tradingsymbol} (${sellRow.expiryLabel}) — inverted grid`
-                : "Sell-side expiry month — inverted grid"
+                ? `${sellRow.tradingsymbol} · ${sellRow.expiryLabel}`
+                : "No Short Sell contract selected"
               : buyRow
-                ? `${buyRow.tradingsymbol} (${buyRow.expiryLabel}) — normal buy grid`
-                : "Buy-side expiry month — normal buy grid"}
+                ? `${buyRow.tradingsymbol} · ${buyRow.expiryLabel}`
+                : "No Buy Side contract selected"}
           </span>
         </div>
       ) : null}

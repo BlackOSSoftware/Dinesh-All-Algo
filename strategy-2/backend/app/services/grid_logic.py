@@ -187,6 +187,7 @@ def default_runtime() -> dict[str, Any]:
         "lastPrice": 0.0,
         "prevPrice": 0.0,
         "sessionAnchorPrice": 0.0,
+        "sessionReferencePrice": 0.0,
         "lastLevelId": None,
         "baseEntered": False,
         "levelStates": {},
@@ -194,7 +195,17 @@ def default_runtime() -> dict[str, Any]:
         "upperReenterHold": {},
         "upperPeakSold": 0,
         "nextActionLevel": None,
+        "effectiveInvertGrid": None,
     }
+
+
+def session_reference_price(cfg: dict[str, Any], runtime: dict[str, Any] | None = None) -> float:
+    """Frozen grid mid-price for the active algo session (ignores mid-session settings edits)."""
+    rt = runtime if isinstance(runtime, dict) else load_runtime(cfg)
+    frozen = _num(rt.get("sessionReferencePrice"))
+    if frozen > 0:
+        return frozen
+    return _num(cfg.get("referencePrice"))
 
 
 def load_runtime(cfg: dict[str, Any]) -> dict[str, Any]:
@@ -848,8 +859,11 @@ def bootstrap_initial_entry(
     if bool(rt.get("baseEntered")) or _int(rt.get("positionLots")) > 0:
         return rt, []
 
+    if _num(rt.get("sessionReferencePrice")) <= 0:
+        rt["sessionReferencePrice"] = ref
+
     levels = build_grid_levels(
-        reference_price=ref,
+        reference_price=_num(rt.get("sessionReferencePrice")) or ref,
         grid_gap=parsed["grid_gap"],
         levels_above=parsed["grid_levels_above"],
         levels_below=parsed["grid_levels_below"],
@@ -910,8 +924,13 @@ def process_price_tick(
     Shared by backtest, paper, and live engines.
     """
     parsed = parse_strategy_config(cfg)
+    rt = load_runtime({**cfg, "grid_runtime": runtime})
+    # Freeze reference for the session so settings edits cannot move BASE/D/U mid-trade.
+    if _num(rt.get("sessionReferencePrice")) <= 0 and parsed["reference_price"] > 0:
+        rt["sessionReferencePrice"] = parsed["reference_price"]
+    ref_px = _num(rt.get("sessionReferencePrice")) or parsed["reference_price"]
     levels = build_grid_levels(
-        reference_price=parsed["reference_price"],
+        reference_price=ref_px,
         grid_gap=parsed["grid_gap"],
         levels_above=parsed["grid_levels_above"],
         levels_below=parsed["grid_levels_below"],
@@ -920,11 +939,9 @@ def process_price_tick(
         invert_grid=parsed["invert_grid"],
     )
     if not levels or current_price <= 0:
-        rt = load_runtime(cfg)
         rt["lastPrice"] = current_price
         return rt, []
 
-    rt = load_runtime({**cfg, "grid_runtime": runtime})
     prev_price = _num(rt.get("prevPrice")) or _num(rt.get("lastPrice"))
     if prev_price <= 0:
         prev_price = current_price

@@ -19,7 +19,8 @@ export async function GET(request: Request) {
       return NextResponse.json({ authenticated: false });
     }
     const user = await upstream.json();
-    return NextResponse.json({ authenticated: true, user });
+    // Return token so client localStorage stays in sync (needed for Generate Token / API Bearer calls).
+    return NextResponse.json({ authenticated: true, user, access_token: token });
   } catch {
     return NextResponse.json({ authenticated: false });
   }

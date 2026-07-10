@@ -251,10 +251,13 @@ def delete_all_trading_logs(db: Session, user_id: int) -> int:
 
 def reset_algo_session(db: Session, user_id: int, *, current_price: float = 0.0) -> dict[str, Any]:
     """Fresh grid session when algo is enabled: clear runtime state and close open DB positions."""
-    from app.services.grid_logic import fresh_grid_runtime
+    from app.services.grid_logic import fresh_grid_runtime, _num
 
     cfg = load_config_dict(db, user_id)
     runtime = fresh_grid_runtime(current_price)
+    ref = _num(cfg.get("referencePrice"))
+    if ref > 0:
+        runtime["sessionReferencePrice"] = ref
     cfg["grid_runtime"] = runtime
     save_strategy_settings(db, user_id, config=cfg)
 
@@ -262,8 +265,8 @@ def reset_algo_session(db: Session, user_id: int, *, current_price: float = 0.0)
     for pos in list_open_positions(db, user_id):
         px = mark if mark > 0 else float(pos.entry_price or 0)
         entry = float(pos.entry_price or 0.0)
-        lots = int(pos.lots or 0)
-        pnl = (px - entry) * lots if entry > 0 else 0.0
+        qty = int(pos.quantity or 0) or int(pos.lots or 0)
+        pnl = (px - entry) * qty if entry > 0 else 0.0
         close_position(db, pos, exit_price=px, exit_reason="ALGO_RESTART", pnl=pnl)
 
     return runtime

@@ -35,6 +35,7 @@ from app.services.grid_logic import (
     compute_level_statuses,
     load_runtime,
     parse_strategy_config,
+    session_reference_price,
 )
 from app.services.grid_backtest import run_grid_backtest
 from app.services.mcx_quotes import fetch_all_mcx_quotes, get_quote_by_key, quote_from_results
@@ -95,7 +96,11 @@ def put_trading_settings(
     if body.config is not None:
         existing = tr.load_config_dict(db, user.id)
         prev_leg_mode = str(existing.get("legEntryMode") or "once").strip().lower()
+        runtime = existing.get("grid_runtime") if isinstance(existing.get("grid_runtime"), dict) else None
         merged_config = {**existing, **body.config}
+        # Keep live grid_runtime when algo is running so settings save cannot wipe/move the ladder.
+        if runtime is not None and bool(row.algo_running):
+            merged_config["grid_runtime"] = runtime
 
     tr.save_strategy_settings(
         db,
@@ -198,8 +203,9 @@ def get_dashboard(user: User = Depends(get_current_user), db: Session = Depends(
     selected = quote_from_results(quotes_raw, parsed["market"])
     current_price = float(selected.price if selected and selected.price > 0 else runtime.get("lastPrice") or 0)
 
+    ref_px = session_reference_price(cfg, runtime) or parsed["reference_price"]
     levels = build_grid_levels(
-        reference_price=parsed["reference_price"],
+        reference_price=ref_px,
         grid_gap=parsed["grid_gap"],
         levels_above=parsed["grid_levels_above"],
         levels_below=parsed["grid_levels_below"],
@@ -300,7 +306,7 @@ def get_dashboard(user: User = Depends(get_current_user), db: Session = Depends(
         trading_mode=(row.trading_mode or "PAPER").upper(),
         quotes=quotes,
         grid_levels=grid_levels,
-        reference_price=parsed["reference_price"],
+        reference_price=ref_px,
         position_lots=position_lots,
         realized_pnl=float(runtime.get("realizedPnl") or 0),
         unrealized_pnl=round(unrealized, 2),

@@ -60,7 +60,23 @@ export type RefreshResult =
   | { ok: false; error?: string };
 
 export async function refreshAngelSession(): Promise<RefreshResult> {
-  const token = getStoredToken();
+  let token = getStoredToken();
+  if (!token) {
+    try {
+      const sessionRes = await fetch("/api/auth/session", { cache: "no-store", credentials: "same-origin" });
+      const sessionData = (await sessionRes.json().catch(() => ({}))) as {
+        authenticated?: boolean;
+        access_token?: string;
+      };
+      if (sessionData.access_token) {
+        const { setStoredToken } = await import("@/lib/auth");
+        setStoredToken(sessionData.access_token);
+        token = sessionData.access_token;
+      }
+    } catch {
+      /* ignore */
+    }
+  }
   if (!token) {
     return { ok: false, error: "Login required before refreshing Angel session." };
   }
@@ -74,7 +90,7 @@ export async function refreshAngelSession(): Promise<RefreshResult> {
       message?: string;
       error?: string;
     };
-    if (res.status === 403) {
+    if (res.status === 401 || res.status === 403) {
       return { ok: false, error: "Login required before refreshing Angel session." };
     }
     if (data.ok === true) {
