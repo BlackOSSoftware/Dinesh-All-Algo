@@ -298,6 +298,9 @@ export type DashboardSnapshot = {
   quotes: MarketQuote[];
   grid_levels: GridLevelRow[];
   reference_price: number;
+  active_symbol?: string;
+  active_side?: string;
+  active_expiry?: string;
   position_lots: number;
   realized_pnl: number;
   unrealized_pnl: number;
@@ -317,6 +320,9 @@ export const EMPTY_DASHBOARD: DashboardSnapshot = {
   quotes: [],
   grid_levels: [],
   reference_price: 0,
+  active_symbol: "",
+  active_side: "",
+  active_expiry: "",
   position_lots: 0,
   realized_pnl: 0,
   unrealized_pnl: 0,

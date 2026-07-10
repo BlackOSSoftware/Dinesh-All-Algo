@@ -138,6 +138,9 @@ class DashboardOut(BaseModel):
     quotes: list[MarketQuoteOut]
     grid_levels: list[GridLevelOut]
     reference_price: float
+    active_symbol: str = ""
+    active_side: str = ""
+    active_expiry: str = ""
     position_lots: int
     realized_pnl: float
     unrealized_pnl: float

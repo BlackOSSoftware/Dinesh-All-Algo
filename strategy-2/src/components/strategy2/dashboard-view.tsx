@@ -265,6 +265,12 @@ export function Strategy2DashboardView() {
         <PremiumCard className="!p-0 overflow-hidden">
           <div className="border-b border-[var(--border-subtle)] px-4 py-3">
             <CardTitle title={`Grid Display · Ref ${fmtPx(data?.reference_price ?? 0)}`} compact />
+            {data?.active_symbol ? (
+              <p className="mt-1 text-xs text-[var(--text-muted)]">
+                Symbol: <span className="font-medium text-[var(--text-secondary)]">{data.active_symbol}</span>
+                {data.active_side ? ` · ${data.active_side}` : ""}
+              </p>
+            ) : null}
           </div>
           <div className="overflow-x-auto">
             <table className="min-w-full text-left text-xs">

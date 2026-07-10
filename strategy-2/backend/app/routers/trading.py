@@ -35,9 +35,12 @@ from app.services.grid_logic import (
     compute_level_statuses,
     load_runtime,
     parse_strategy_config,
+    resolve_active_expiry,
+    resolve_invert_grid,
     session_reference_price,
 )
 from app.services.grid_backtest import run_grid_backtest
+from app.services.mcx_instruments import get_instrument
 from app.services.mcx_quotes import fetch_all_mcx_quotes, get_quote_by_key, quote_from_results
 from app.services.mcx_scrip_resolver import list_mcx_future_expiries
 from app.services.trading_engine import _angel_headers, manual_close_leg
@@ -101,6 +104,25 @@ def put_trading_settings(
         # Keep live grid_runtime when algo is running so settings save cannot wipe/move the ladder.
         if runtime is not None and bool(row.algo_running):
             merged_config["grid_runtime"] = runtime
+            rt = dict(runtime)
+            in_trade = int(rt.get("positionLots") or 0) > 0 or bool(rt.get("baseEntered"))
+            # While still flat, allow Reference Price / gap edits to rebuild the pending ladder.
+            if not in_trade:
+                from app.services.grid_logic import _num
+
+                new_ref = _num(merged_config.get("referencePrice"))
+                if new_ref > 0:
+                    rt["sessionReferencePrice"] = new_ref
+                merged_config["grid_runtime"] = rt
+        elif isinstance(runtime, dict):
+            # Algo stopped: sync session ref to saved Reference Price so Grid Display matches settings.
+            from app.services.grid_logic import _num
+
+            rt = dict(runtime)
+            new_ref = _num(merged_config.get("referencePrice"))
+            if new_ref > 0:
+                rt["sessionReferencePrice"] = new_ref
+            merged_config["grid_runtime"] = rt
 
     tr.save_strategy_settings(
         db,
@@ -221,6 +243,15 @@ def get_dashboard(user: User = Depends(get_current_user), db: Session = Depends(
         for r in grid_rows
     ]
 
+    active_expiry = resolve_active_expiry(cfg, as_of=now)
+    instrument = get_instrument(parsed["market"], expiry_iso=active_expiry or None)
+    active_symbol = ""
+    if instrument and instrument.tradingsymbol:
+        active_symbol = instrument.tradingsymbol
+    elif selected and getattr(selected, "tradingsymbol", ""):
+        active_symbol = str(selected.tradingsymbol)
+    active_side = "Short Sell" if resolve_invert_grid(cfg, as_of=now) else "Buy Side"
+
     position_lots = int(runtime.get("positionLots") or 0)
     avg_entry = float(runtime.get("avgEntryPrice") or 0)
     unrealized = (current_price - avg_entry) * position_lots if position_lots > 0 and current_price > 0 else 0.0
@@ -307,6 +338,9 @@ def get_dashboard(user: User = Depends(get_current_user), db: Session = Depends(
         quotes=quotes,
         grid_levels=grid_levels,
         reference_price=ref_px,
+        active_symbol=active_symbol,
+        active_side=active_side,
+        active_expiry=active_expiry or "",
         position_lots=position_lots,
         realized_pnl=float(runtime.get("realizedPnl") or 0),
         unrealized_pnl=round(unrealized, 2),

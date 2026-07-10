@@ -513,7 +513,10 @@ def process_user_tick(db, user_id: int) -> None:
             if frozen_ref > 0:
                 runtime["sessionReferencePrice"] = frozen_ref
     runtime["effectiveInvertGrid"] = effective_invert
-    if float(runtime.get("sessionReferencePrice") or 0) <= 0 and parsed["reference_price"] > 0:
+    in_trade = int(runtime.get("positionLots") or 0) > 0 or bool(runtime.get("baseEntered"))
+    if not in_trade and parsed["reference_price"] > 0:
+        runtime["sessionReferencePrice"] = parsed["reference_price"]
+    elif float(runtime.get("sessionReferencePrice") or 0) <= 0 and parsed["reference_price"] > 0:
         runtime["sessionReferencePrice"] = parsed["reference_price"]
     runtime = seed_runtime_market_price(runtime, price)
     prev_runtime = copy.deepcopy(runtime)

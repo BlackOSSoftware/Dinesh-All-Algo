@@ -200,12 +200,15 @@ def default_runtime() -> dict[str, Any]:
 
 
 def session_reference_price(cfg: dict[str, Any], runtime: dict[str, Any] | None = None) -> float:
-    """Frozen grid mid-price for the active algo session (ignores mid-session settings edits)."""
+    """Grid mid-price: frozen only after BASE/position is live; otherwise follow settings."""
     rt = runtime if isinstance(runtime, dict) else load_runtime(cfg)
-    frozen = _num(rt.get("sessionReferencePrice"))
-    if frozen > 0:
-        return frozen
-    return _num(cfg.get("referencePrice"))
+    settings_ref = _num(cfg.get("referencePrice"))
+    in_trade = int(rt.get("positionLots") or 0) > 0 or bool(rt.get("baseEntered"))
+    if in_trade:
+        frozen = _num(rt.get("sessionReferencePrice"))
+        if frozen > 0:
+            return frozen
+    return settings_ref
 
 
 def load_runtime(cfg: dict[str, Any]) -> dict[str, Any]:
@@ -925,10 +928,16 @@ def process_price_tick(
     """
     parsed = parse_strategy_config(cfg)
     rt = load_runtime({**cfg, "grid_runtime": runtime})
-    # Freeze reference for the session so settings edits cannot move BASE/D/U mid-trade.
-    if _num(rt.get("sessionReferencePrice")) <= 0 and parsed["reference_price"] > 0:
-        rt["sessionReferencePrice"] = parsed["reference_price"]
-    ref_px = _num(rt.get("sessionReferencePrice")) or parsed["reference_price"]
+    # Freeze reference only after the grid is live; while flat, follow latest settings.
+    in_trade = int(rt.get("positionLots") or 0) > 0 or bool(rt.get("baseEntered"))
+    if in_trade:
+        if _num(rt.get("sessionReferencePrice")) <= 0 and parsed["reference_price"] > 0:
+            rt["sessionReferencePrice"] = parsed["reference_price"]
+        ref_px = _num(rt.get("sessionReferencePrice")) or parsed["reference_price"]
+    else:
+        ref_px = parsed["reference_price"]
+        if ref_px > 0:
+            rt["sessionReferencePrice"] = ref_px
     levels = build_grid_levels(
         reference_price=ref_px,
         grid_gap=parsed["grid_gap"],

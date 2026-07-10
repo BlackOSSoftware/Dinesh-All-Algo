@@ -1,4 +1,4 @@
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $root
 
@@ -7,6 +7,7 @@ $FrontendUrl = "http://localhost:3003"
 $FrontendPort = 3003
 $BackendPort = 8003
 $ChromeProfileDir = Join-Path $env:TEMP "indian-algo-all-strategies"
+$ChromeDebugPort = 9333
 
 function Stop-PidTree {
     param([Parameter(Mandatory = $true)][int]$ProcId)
@@ -74,6 +75,48 @@ function Get-ChromePath {
     return $null
 }
 
+function Test-ChromeDebugApi {
+    try {
+        $null = Invoke-RestMethod -Uri "http://127.0.0.1:$ChromeDebugPort/json/version" -TimeoutSec 1
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Stop-SharedAlgoChrome {
+    $procs = @()
+    try {
+        $procs = @(Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" -ErrorAction SilentlyContinue |
+            Where-Object { $_.CommandLine -and ($_.CommandLine -like "*indian-algo-all-strategies*") })
+    } catch {
+        $procs = @()
+    }
+    foreach ($p in $procs) {
+        Stop-PidTree -ProcId ([int]$p.ProcessId)
+    }
+}
+
+function Close-ChromeTabsForUrl {
+    param([Parameter(Mandatory = $true)][string]$Url)
+    if (-not (Test-ChromeDebugApi)) { return }
+    $authority = ([uri]$Url).Authority
+    $tabs = @()
+    try {
+        $tabs = @(Invoke-RestMethod -Uri "http://127.0.0.1:$ChromeDebugPort/json" -TimeoutSec 2)
+    } catch {
+        return
+    }
+    foreach ($tab in $tabs) {
+        if ($tab.type -ne "page") { continue }
+        if ([string]$tab.url -notlike "*${authority}*") { continue }
+        Write-Host "  Closing old Chrome tab ($authority)..." -ForegroundColor DarkYellow
+        try {
+            Invoke-RestMethod -Uri "http://127.0.0.1:$ChromeDebugPort/json/close/$($tab.id)" -TimeoutSec 2 | Out-Null
+        } catch { }
+    }
+}
+
 function Open-StrategyInChrome {
     param([Parameter(Mandatory = $true)][string]$Url)
     $chrome = Get-ChromePath
@@ -81,8 +124,26 @@ function Open-StrategyInChrome {
         Write-Host "Chrome not found. Open $Url manually." -ForegroundColor DarkYellow
         return
     }
-    $argLine = '--user-data-dir="' + $ChromeProfileDir + '" --no-first-run --no-default-browser-check ' + $Url
-    Start-Process -FilePath $chrome -ArgumentList $argLine | Out-Null
+
+    # Shared profile must run with remote debugging so we can close/reopen one strategy tab.
+    if (-not (Test-ChromeDebugApi)) {
+        Write-Host "  Starting shared Chrome (enabling tab control)..." -ForegroundColor DarkYellow
+        Stop-SharedAlgoChrome
+        Start-Sleep -Seconds 1
+        $argLine = '--user-data-dir="' + $ChromeProfileDir + '" --remote-debugging-port=' + $ChromeDebugPort + ' --no-first-run --no-default-browser-check "' + $Url + '"'
+        Start-Process -FilePath $chrome -ArgumentList $argLine | Out-Null
+        Start-Sleep -Seconds 2
+        return
+    }
+
+    Close-ChromeTabsForUrl -Url $Url
+    Start-Sleep -Milliseconds 400
+    try {
+        Invoke-RestMethod -Uri ("http://127.0.0.1:$ChromeDebugPort/json/new?" + $Url) -Method Put -TimeoutSec 3 | Out-Null
+    } catch {
+        $argLine = '--user-data-dir="' + $ChromeProfileDir + '" --remote-debugging-port=' + $ChromeDebugPort + ' --no-first-run --no-default-browser-check "' + $Url + '"'
+        Start-Process -FilePath $chrome -ArgumentList $argLine | Out-Null
+    }
 }
 
 $children = @()
@@ -97,6 +158,7 @@ try {
     Write-Host "Stopping any previous $StrategyName instance on ports $FrontendPort / $BackendPort..." -ForegroundColor Yellow
     Clear-ListenPort -Port $FrontendPort
     Clear-ListenPort -Port $BackendPort
+    Close-ChromeTabsForUrl -Url $FrontendUrl
     Start-Sleep -Seconds 2
 
     $children += Start-ManagedProcess -Name "Backend" -Command "npm run worker"
@@ -125,10 +187,10 @@ try {
     Start-Sleep -Seconds 4
 
     Open-StrategyInChrome -Url $FrontendUrl
-    Write-Host "Opened in shared Chrome window: $FrontendUrl" -ForegroundColor Green
+    Write-Host "Opened Chrome tab: $FrontendUrl (old tab for this port closed if it existed)" -ForegroundColor Green
 
     Write-Host "Started. Press ENTER to stop backend + frontend (Chrome stays open)." -ForegroundColor Green
-    Write-Host "Re-run this CMD anytime - old ports are freed automatically."
+    Write-Host "Re-run this CMD anytime - old ports are freed and the Chrome tab is replaced."
 
     while ($true) {
         foreach ($child in $children) {
