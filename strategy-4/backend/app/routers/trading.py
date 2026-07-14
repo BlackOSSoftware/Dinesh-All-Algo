@@ -31,10 +31,12 @@ from app.services import trading_repository as tr
 from app.services.breakout_logic import (
     build_strategy_levels,
     dashboard_snapshot_fields,
+    describe_breakout_next_action,
     load_runtime,
     parse_strategy_config,
 )
 from app.services.breakout_backtest import run_breakout_backtest
+from app.services.breakout_trading_engine import _in_session
 from app.services.mcx_quotes import fetch_all_mcx_quotes, get_quote_by_key, quote_from_results
 from app.services.trading_engine import _angel_headers, manual_close_leg
 
@@ -244,9 +246,45 @@ def get_dashboard(user: User = Depends(get_current_user), db: Session = Depends(
         for r in log_rows
     ]
 
+    last_live_error: str | None = None
+    last_live_error_at: str | None = None
+    for r in log_rows:
+        action = str(r.action or "").upper()
+        if action in ("ERROR", "LIVE_SKIPPED", "LIVE_REJECT", "ORDER_FAIL") or (
+            r.message and "fail" in str(r.message).lower()
+        ):
+            last_live_error = str(r.message or action)
+            last_live_error_at = _iso(r.created_at)
+            break
+
+    active_symbol = str(selected.tradingsymbol if selected and getattr(selected, "tradingsymbol", "") else "")
+    price_type = str(getattr(selected, "price_type", "LTP") if selected else "")
+    side_val = snap.get("side")
+    active_side = str(side_val) if side_val else None
+    in_session = _in_session(parsed["start_time"], parsed["end_time"])
+    algo_running = bool(row.algo_running)
+    next_action = describe_breakout_next_action(
+        phase=str(snap.get("phase") or ""),
+        algo_running=algo_running,
+        in_session=in_session,
+        reference_price=float(snap.get("reference_price") or 0),
+        buy_trigger=float(snap.get("buy_trigger") or 0),
+        sell_trigger=float(snap.get("sell_trigger") or 0),
+        current_price=current_price,
+        side=active_side,
+        is_reverse=bool(snap.get("is_reverse")),
+        entry_price=float(snap.get("entry_price") or 0),
+        tp_price=float(snap.get("tp_price") or 0),
+        sl_price=float(snap.get("sl_price") or 0),
+        take_profit=float(parsed["take_profit"]),
+        stop_loss=float(parsed["stop_loss"]),
+        lots=int(parsed["lots"]),
+        status_message=str(snap.get("status_message") or ""),
+    )
+
     return DashboardOut(
         config=cfg,
-        algo_running=bool(row.algo_running),
+        algo_running=algo_running,
         trading_mode=(row.trading_mode or "PAPER").upper(),
         quotes=quotes,
         grid_levels=grid_levels,
@@ -255,7 +293,7 @@ def get_dashboard(user: User = Depends(get_current_user), db: Session = Depends(
         realized_pnl=float(runtime.get("realizedPnl") or 0),
         unrealized_pnl=round(unrealized, 2),
         current_market_price=current_price,
-        next_action_level=str(snap.get("phase") or runtime.get("phase")),
+        next_action_level=next_action,
         phase=str(snap.get("phase") or ""),
         buy_trigger=float(snap.get("buy_trigger") or 0),
         sell_trigger=float(snap.get("sell_trigger") or 0),
@@ -264,6 +302,21 @@ def get_dashboard(user: User = Depends(get_current_user), db: Session = Depends(
         sl_price=float(snap.get("sl_price") or 0),
         trade_count=int(snap.get("trade_count") or 0),
         status_message=str(snap.get("status_message") or ""),
+        market=str(parsed["market"]),
+        active_symbol=active_symbol,
+        active_side=active_side,
+        is_reverse=bool(snap.get("is_reverse")),
+        ref_candle_time=str(snap.get("ref_candle_time") or ""),
+        session_start=str(parsed["start_time"]),
+        session_end=str(parsed["end_time"]),
+        breakout_distance=float(parsed["breakout_distance"]),
+        take_profit_pts=float(parsed["take_profit"]),
+        stop_loss_pts=float(parsed["stop_loss"]),
+        lots=int(parsed["lots"]),
+        price_type=price_type,
+        in_session=in_session,
+        last_live_error=last_live_error,
+        last_live_error_at=last_live_error_at,
         active_trades=active_trades,
         completed_trades=completed_trades,
         logs=logs,

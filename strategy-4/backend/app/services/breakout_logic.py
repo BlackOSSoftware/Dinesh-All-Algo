@@ -814,7 +814,64 @@ def dashboard_snapshot_fields(runtime: dict[str, Any]) -> dict[str, Any]:
         "trade_count": _int(runtime.get("tradeCount")),
         "is_reverse": bool(runtime.get("isReverse")),
         "status_message": str(runtime.get("message") or ""),
+        "ref_candle_time": str(runtime.get("refCandleTime") or ""),
+        "session_date": str(runtime.get("sessionDate") or ""),
     }
+
+
+def describe_breakout_next_action(
+    *,
+    phase: str,
+    algo_running: bool,
+    in_session: bool,
+    reference_price: float,
+    buy_trigger: float,
+    sell_trigger: float,
+    current_price: float,
+    side: str | None,
+    is_reverse: bool,
+    entry_price: float,
+    tp_price: float,
+    sl_price: float,
+    take_profit: float,
+    stop_loss: float,
+    lots: int,
+    status_message: str,
+) -> str:
+    """Human next-action text for the dashboard only — does not affect trading."""
+    if not algo_running:
+        return "Algo stopped — Enable Algo to arm reference / breakout."
+    if not in_session:
+        return "Outside session window — ticks ignored until start–end time."
+    phase_u = (phase or "IDLE").upper()
+    if phase_u in ("IDLE", "WAIT_REF"):
+        return status_message or "Waiting for start-time candle close as reference."
+    if phase_u == "WAIT_BREAKOUT":
+        if reference_price <= 0:
+            return "Reference not set yet — waiting for start-time close."
+        parts = [
+            f"Armed on close/LTP {current_price:.2f} vs ref {reference_price:.2f}.",
+            f"BUY if price >= {buy_trigger:.2f} -> TP +{take_profit:g} / SL -{stop_loss:g} ({lots} lot).",
+            f"SELL if price <= {sell_trigger:.2f} -> TP -{take_profit:g} / SL +{stop_loss:g} ({lots} lot).",
+        ]
+        if current_price > 0 and buy_trigger > 0:
+            parts.append(f"gap to BUY {buy_trigger - current_price:+.2f}")
+        if current_price > 0 and sell_trigger > 0:
+            parts.append(f"gap to SELL {current_price - sell_trigger:+.2f}")
+        return " · ".join(parts)
+    if phase_u in ("IN_TRADE", "REVERSE_TRADE"):
+        kind = "Reverse" if is_reverse or phase_u == "REVERSE_TRADE" else "Initial"
+        side_lbl = side or "—"
+        return (
+            f"{kind} {side_lbl} open @ {entry_price:.2f} · "
+            f"exit TP {tp_price:.2f} / SL {sl_price:.2f}"
+            + (" · reverse only if initial SL hits" if not is_reverse and phase_u == "IN_TRADE" else "")
+        )
+    if phase_u == "DONE":
+        return status_message or "Session complete — no more entries today."
+    if phase_u == "NO_TRADE":
+        return status_message or "No breakout today."
+    return status_message or phase_u
 
 
 def process_price_tick(cfg: dict[str, Any], runtime: dict[str, Any], price: float) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -841,17 +898,25 @@ def process_price_tick(cfg: dict[str, Any], runtime: dict[str, Any], price: floa
         sell_trig = _num(rt.get("sellTrigger"))
         ref = _num(rt.get("referencePrice"))
         side: Side | None = None
+        # Path cross OR already beyond trigger on this tick (gap / late arm).
+        hit_buy = buy_trig > 0 and (hi >= buy_trig - 1e-9 or price >= buy_trig - 1e-9)
+        hit_sell = sell_trig > 0 and (lo <= sell_trig + 1e-9 or price <= sell_trig + 1e-9)
         if buy_trig > 0 and sell_trig > 0:
-            if hi >= buy_trig - 1e-9 and lo <= sell_trig + 1e-9:
+            if hit_buy and hit_sell:
                 side = "SELL" if ref > 0 and prev <= ref else "BUY"
-            elif hi >= buy_trig - 1e-9:
+            elif hit_buy:
                 side = "BUY"
-            elif lo <= sell_trig + 1e-9:
+            elif hit_sell:
                 side = "SELL"
         if side:
             rt, entry_action = _open_entry(side=side, fill=round(price, 4), parsed=parsed, rt=rt, is_reverse=False)
             actions.append(entry_action)
             phase = str(rt.get("phase"))
+        else:
+            rt["message"] = (
+                f"Armed · LTP {price:.2f} · Buy {buy_trig:.2f} (gap {buy_trig - price:+.2f}) · "
+                f"Sell {sell_trig:.2f} (gap {price - sell_trig:+.2f})"
+            )
 
     if phase in ("IN_TRADE", "REVERSE_TRADE") and rt.get("side") in ("BUY", "SELL"):
         side = rt["side"]  # type: Side
@@ -859,14 +924,14 @@ def process_price_tick(cfg: dict[str, Any], runtime: dict[str, Any], price: floa
         sl = _num(rt.get("slPrice"))
         exit_reason: str | None = None
         if side == "BUY":
-            if lo <= sl + 1e-9:
+            if lo <= sl + 1e-9 or price <= sl + 1e-9:
                 exit_reason = "SL"
-            elif hi >= tp - 1e-9:
+            elif hi >= tp - 1e-9 or price >= tp - 1e-9:
                 exit_reason = "TP"
         else:
-            if hi >= sl - 1e-9:
+            if hi >= sl - 1e-9 or price >= sl - 1e-9:
                 exit_reason = "SL"
-            elif lo <= tp + 1e-9:
+            elif lo <= tp + 1e-9 or price <= tp + 1e-9:
                 exit_reason = "TP"
         if exit_reason:
             allow_rev = exit_reason == "SL" and phase == "IN_TRADE"

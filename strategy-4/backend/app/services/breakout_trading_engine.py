@@ -52,12 +52,43 @@ def _parse_hhmm(value: str) -> tuple[int, int]:
 
 
 def _in_session(start_time: str, end_time: str) -> bool:
+    """True when now is inside [start, end]. Supports overnight windows (end < start)."""
     now = _ist_now()
     sh, sm = _parse_hhmm(start_time)
     eh, em = _parse_hhmm(end_time)
     start = now.replace(hour=sh, minute=sm, second=0, microsecond=0)
     end = now.replace(hour=eh, minute=em, second=59, microsecond=999999)
+    if end < start:
+        # e.g. 18:29 → 02:30 next calendar morning
+        return now >= start or now <= end
     return start <= now <= end
+
+
+def _runtime_changed(before: dict[str, Any], after: dict[str, Any]) -> bool:
+    keys = (
+        "phase",
+        "sessionDate",
+        "referencePrice",
+        "buyTrigger",
+        "sellTrigger",
+        "side",
+        "entryPrice",
+        "tpPrice",
+        "slPrice",
+        "isReverse",
+        "tradeCount",
+        "positionLots",
+        "realizedPnl",
+        "lastPrice",
+        "prevPrice",
+        "refCandleTime",
+        "message",
+        "reverseEntryBarTime",
+    )
+    for k in keys:
+        if before.get(k) != after.get(k):
+            return True
+    return False
 
 
 def _session_date() -> str:
@@ -131,10 +162,16 @@ def _maybe_set_reference(db, user_id: int, cfg: dict[str, Any], runtime: dict[st
         return rt
 
     if not instrument or not instrument.configured:
-        return runtime
+        rt = copy.copy(runtime)
+        rt["phase"] = str(rt.get("phase") or "WAIT_REF")
+        rt["message"] = "MCX instrument token/symbol not configured — cannot fetch reference candle"
+        return rt
 
     key = f"{user_id}:{_session_date()}"
-    if time.monotonic() - _REF_FETCH_AT.get(key, 0) < 45:
+    # Don't starve WAIT_BREAKOUT: only throttle Angel history calls, and keep retrying
+    # until a reference candle is actually locked in.
+    last_fetch = _REF_FETCH_AT.get(key, 0)
+    if time.monotonic() - last_fetch < 15:
         return runtime
     _REF_FETCH_AT[key] = time.monotonic()
 
@@ -160,9 +197,17 @@ def _maybe_set_reference(db, user_id: int, cfg: dict[str, Any], runtime: dict[st
                 message=str(rt.get("message") or "")[:900],
             )
             return rt
+        rt = copy.copy(runtime)
+        rt["phase"] = "WAIT_REF"
+        rt["message"] = (
+            f"No {parsed['start_time']} candle yet for {_session_date()} "
+            f"({instrument.tradingsymbol}) — retrying"
+        )
+        return rt
     except Exception as exc:  # noqa: BLE001
         LOG.warning("Reference candle fetch failed: %s", exc)
         rt = copy.copy(runtime)
+        rt["phase"] = "WAIT_REF"
         rt["message"] = f"Reference fetch failed: {exc}"
         return rt
     return runtime
@@ -236,6 +281,7 @@ def process_user_tick(db, user_id: int) -> None:
     price = float(quote.price if quote else 0)
     runtime = load_runtime(cfg)
     runtime = _ensure_daily_session(cfg, runtime)
+    loaded_runtime = copy.deepcopy(runtime)
 
     cached = _TICK_PRICE.get(user_id)
     today = _session_date()
@@ -248,7 +294,12 @@ def process_user_tick(db, user_id: int) -> None:
     if price <= 0:
         price = float(runtime.get("lastPrice") or 0)
     mode = (row.trading_mode or "PAPER").upper()
+
+    # Even without a usable LTP, persist reference / phase so WAIT_BREAKOUT sticks.
     if price <= 0:
+        if _runtime_changed(loaded_runtime, runtime):
+            cfg["breakout_runtime"] = runtime
+            tr.save_strategy_settings(db, user_id, config=cfg)
         return
 
     prev_runtime = copy.deepcopy(runtime)
@@ -338,14 +389,29 @@ def process_user_tick(db, user_id: int) -> None:
         )
 
     if mode == "LIVE" and live_failed:
-        runtime = prev_runtime
+        # Roll back trade actions, but keep newly armed reference / WAIT_BREAKOUT state.
+        rolled = copy.deepcopy(prev_runtime)
+        rolled["phase"] = prev_runtime.get("phase") or loaded_runtime.get("phase")
+        rolled["referencePrice"] = prev_runtime.get("referencePrice") or loaded_runtime.get("referencePrice")
+        rolled["buyTrigger"] = prev_runtime.get("buyTrigger") or loaded_runtime.get("buyTrigger")
+        rolled["sellTrigger"] = prev_runtime.get("sellTrigger") or loaded_runtime.get("sellTrigger")
+        rolled["refCandleTime"] = prev_runtime.get("refCandleTime") or loaded_runtime.get("refCandleTime")
+        rolled["message"] = prev_runtime.get("message") or loaded_runtime.get("message")
+        rolled["lastPrice"] = runtime.get("lastPrice") or prev_runtime.get("lastPrice")
+        rolled["prevPrice"] = runtime.get("prevPrice") or prev_runtime.get("prevPrice")
+        runtime = rolled
     else:
         for act in kept_actions:
             _sync_position(db, user_id=user_id, instrument=instrument, mode=mode, action=act, mark_price=price)
 
-    persist = bool(actions) or runtime.get("phase") != prev_runtime.get("phase")
-    persist = persist or _num(runtime.get("referencePrice")) != _num(prev_runtime.get("referencePrice"))
-    if persist or live_failed:
+    # Critical: always persist reference / WAIT_BREAKOUT / lastPrice so the next tick
+    # is not stuck in WAIT_REF (old bug: ref set in memory then thrown away).
+    if (
+        bool(actions)
+        or live_failed
+        or _runtime_changed(loaded_runtime, runtime)
+        or _runtime_changed(prev_runtime, runtime)
+    ):
         cfg["breakout_runtime"] = runtime
         tr.save_strategy_settings(db, user_id, config=cfg)
 

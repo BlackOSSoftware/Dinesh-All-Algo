@@ -1,10 +1,16 @@
 """Unit tests for Strategy 4 breakout logic."""
 
+from datetime import datetime, timedelta, timezone
+
+from app.services import breakout_trading_engine as eng
 from app.services.breakout_logic import (
     compute_tp_sl,
     compute_triggers,
+    process_price_tick,
+    set_reference_from_candle,
     simulate_day,
 )
+from app.services.breakout_trading_engine import _runtime_changed
 
 
 def _cfg(**overrides):
@@ -96,6 +102,7 @@ def test_never_both_initial_directions():
     assert len(initials) <= 1
     assert report["initialDirection"] in ("BUY", "SELL", None)
 
+
 def test_reverse_not_exits_same_candle():
     """Reverse entry must not exit on the same 1-min bar (policy)."""
     candles = [
@@ -106,7 +113,9 @@ def test_reverse_not_exits_same_candle():
     ]
     _rt, events, report = simulate_day(candles, _cfg(), session_date="2024-06-01")
     reverse_entries = [e for e in events if e.get("action") == "REVERSE_SELL"]
-    reverse_exits = [e for e in events if str(e.get("action", "")).startswith("EXIT_") and e.get("entryType") == "Reverse"]
+    reverse_exits = [
+        e for e in events if str(e.get("action", "")).startswith("EXIT_") and e.get("entryType") == "Reverse"
+    ]
     assert len(reverse_entries) == 1
     assert not reverse_exits or reverse_exits[0]["time"] != reverse_entries[0]["time"]
     assert "Reverse" in (report.get("result") or "")
@@ -122,3 +131,57 @@ def test_no_breakout_no_trade():
     assert trades == []
     assert report["result"] == "No breakout"
 
+
+def test_live_tick_buys_when_already_above_trigger():
+    """After late arming, LTP already above buy trigger must still open BUY."""
+    cfg = _cfg()
+    rt = set_reference_from_candle(
+        {"phase": "WAIT_REF", "prevPrice": 301.0, "lastPrice": 301.0},
+        {"time": "18:29", "close": 300.0},
+        {
+            "breakout_distance": 0.5,
+            "take_profit": 1.0,
+            "stop_loss": 0.8,
+            "lots": 4,
+        },
+    )
+    assert rt["phase"] == "WAIT_BREAKOUT"
+    assert rt["buyTrigger"] == 300.5
+    next_rt, actions = process_price_tick(cfg, rt, 301.0)
+    assert any(a["action"] == "INITIAL_BUY" for a in actions)
+    assert next_rt["phase"] == "IN_TRADE"
+    assert next_rt["side"] == "BUY"
+
+
+def test_live_tick_sells_on_path_cross():
+    cfg = _cfg()
+    rt = {
+        "phase": "WAIT_BREAKOUT",
+        "referencePrice": 300.0,
+        "buyTrigger": 300.5,
+        "sellTrigger": 299.5,
+        "prevPrice": 300.0,
+        "lastPrice": 300.0,
+        "tradeCount": 0,
+        "realizedPnl": 0.0,
+    }
+    next_rt, actions = process_price_tick(cfg, rt, 299.4)
+    assert any(a["action"] == "INITIAL_SELL" for a in actions)
+    assert next_rt["side"] == "SELL"
+
+
+def test_runtime_changed_detects_reference():
+    before = {"phase": "WAIT_REF", "referencePrice": 0}
+    after = {"phase": "WAIT_BREAKOUT", "referencePrice": 300.0}
+    assert _runtime_changed(before, after)
+
+
+def test_in_session_overnight_window():
+    fixed = datetime(2026, 7, 15, 1, 0, tzinfo=timezone(timedelta(hours=5, minutes=30)))
+    original = eng._ist_now
+    eng._ist_now = lambda: fixed
+    try:
+        assert eng._in_session("18:29", "02:30") is True
+        assert eng._in_session("18:29", "23:30") is False
+    finally:
+        eng._ist_now = original

@@ -151,6 +151,22 @@ class DashboardOut(BaseModel):
     sl_price: float = 0
     trade_count: int = 0
     status_message: str = ""
+    # Display-only context (no strategy logic change)
+    market: str = ""
+    active_symbol: str = ""
+    active_side: str | None = None
+    is_reverse: bool = False
+    ref_candle_time: str = ""
+    session_start: str = ""
+    session_end: str = ""
+    breakout_distance: float = 0
+    take_profit_pts: float = 0
+    stop_loss_pts: float = 0
+    lots: int = 0
+    price_type: str = ""
+    in_session: bool = False
+    last_live_error: str | None = None
+    last_live_error_at: str | None = None
     active_trades: list[ActivePositionOut]
     completed_trades: list[CompletedPositionOut]
     logs: list[TradingLogOut]
