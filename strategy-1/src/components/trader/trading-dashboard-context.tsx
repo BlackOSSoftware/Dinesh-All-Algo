@@ -277,6 +277,7 @@ const DEFAULT_ENTRY_LOTS = [2, 1, 1, 1];
 const DEFAULT_INITIAL_LOTS = 2;
 const DEFAULT_ADD_LOTS = 1;
 const DEFAULT_TP2_TRAIL = 30;
+const DEFAULT_RE_ENTRY_GAP = 70;
 const DEFAULT_MAX_RE_ENTRIES = 3;
 
 type PreviewLegRow = {
@@ -554,7 +555,7 @@ function useTradingDashboardState() {
   const [maxReEntries, setMaxReEntries] = useState(DEFAULT_MAX_RE_ENTRIES);
   const [callEnabled, setCallEnabled] = useState(true);
   const [putEnabled, setPutEnabled] = useState(true);
-  const [reEntryGap, setReEntryGap] = useState(DEFAULT_ADD_GAP);
+  const [reEntryGap, setReEntryGap] = useState(DEFAULT_RE_ENTRY_GAP);
   const [tradeDirection, setTradeDirection] = useState<"BOTH" | "CALL_ONLY" | "PUT_ONLY">("BOTH");
   const [autoSquareOffTime, setAutoSquareOffTime] = useState("15:30");
   const [ceStopLoss, setCeStopLoss] = useState<number | null>(null);

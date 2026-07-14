@@ -219,7 +219,7 @@ export function buildPlannedLevelsFromParams(
     }
   }
   if (p.reEntryEnabled) {
-    rows.push({ type: "REENTRY_RULE", side: "BOTH", level: p.reEntryGap, lots: lots[0], tp1: null, tp2Trail: null, stopLoss: null, note: `Re-enter on ${p.reEntryGap}pt pullback after TP2 (above cycle SL)` });
+    rows.push({ type: "REENTRY_RULE", side: "BOTH", level: p.reEntryGap, lots: lots[0], tp1: null, tp2Trail: null, stopLoss: null, note: `Re-enter on ADP high/low ± ${p.reEntryGap}pt pullback after TP2 (above cycle SL)` });
   }
   return rows;
 }

@@ -162,7 +162,7 @@ def _planned_levels(base: float, p: TrendParams) -> list[dict[str, Any]]:
                 "tp1": None,
                 "tp2_trail": None,
                 "stop_loss": None,
-                "note": f"After TP2 trail exit, re-enter on {p.re_entry_gap}pt pullback (above cycle SL)",
+                "note": f"After TP2 trail exit, re-enter on ADP high/low ± {p.re_entry_gap:g}pt pullback (above cycle SL)",
             }
         )
     return rows

@@ -121,7 +121,7 @@ const BT_DEFAULTS: BacktestParams = {
   tp1Points: 45,
   firstEntryTp1Points: 70,
   tp2Trail: 30,
-  reEntryGap: 45,
+  reEntryGap: 70,
   autoSquareOffTime: "15:30",
   tradeDirection: "BOTH",
   callEnabled: true,

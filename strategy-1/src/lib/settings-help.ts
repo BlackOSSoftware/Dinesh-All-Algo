@@ -23,14 +23,14 @@ export const SETTINGS_HELP: Record<string, string> = {
   tp2Trail:
     "After core TP1, remaining lots trail the session extreme by this many index points for TP2 exit.",
   reEntryGap:
-    "Pullback required (index points) after TP2 before the algo can re-enter in the same direction.",
+    "After TP2, re-enter when index pulls back this many points from the adaptive high (CALL) or adaptive low (PUT).",
   autoSquareOff:
     "Time (IST) to force-close all open positions before market end, regardless of targets.",
   tradeDirection:
     "Restrict which side the algo trades: both Call & Put, Call only, or Put only.",
   callEnabled: "Allow Call (bullish) entries when index breaks above the upper trigger.",
   putEnabled: "Allow Put (bearish) entries when index breaks below the lower trigger.",
-  reEntryEnabled: "Allow a new cycle after TP2 trail exit when price pulls back by the re-entry gap.",
+  reEntryEnabled: "Allow a new cycle after TP2 trail exit when price pulls back from ADP high/low by the re-entry gap.",
   firstEntryEnabled:
     "Enable the first entry of the day. Turn off to skip initial trigger and only allow re-entries.",
   maxReEntries: "Cap how many re-entry cycles per day. Set 0 for unlimited re-entries.",

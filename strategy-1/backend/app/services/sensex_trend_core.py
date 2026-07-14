@@ -41,7 +41,7 @@ class TrendParams:
     tp2_trail: float = 30.0
     stop_distance: float = 191.0
     re_entry_enabled: bool = True
-    re_entry_gap: float = 45.0
+    re_entry_gap: float = 70.0
     max_re_entries: int | None = 3
     call_enabled: bool = True
     put_enabled: bool = True
@@ -147,7 +147,7 @@ class TrendParams:
             tp2_trail=_f("tp2TrailPoints", default=30.0),
             stop_distance=_f("stopDistance", default=191.0),
             re_entry_enabled=bool(cfg.get("reEntryEnabled", True)),
-            re_entry_gap=_f("reEntryGap", default=45.0),
+            re_entry_gap=_f("reEntryGap", default=70.0),
             max_re_entries=max_re_i,
             call_enabled=call_on,
             put_enabled=put_on,
@@ -723,9 +723,11 @@ def process_bar(
                     if p.re_entry_enabled and (
                         p.max_re_entries is None or state.re_entry_count < p.max_re_entries
                     ):
+                        # Re-entry trigger = adaptive high − re_entry_gap (not TP2 trail price).
                         state.wait_reentry_side = "CALL"
-                        state.reentry_anchor = trail_tp
+                        state.reentry_anchor = extreme
                         state.reentry_cycle_base = extreme
+                        state.adaptive_high = max(state.adaptive_high or extreme, extreme)
                         state.re_entry_count += 1
                     else:
                         state.wait_reentry_side = None
@@ -758,9 +760,11 @@ def process_bar(
                     if p.re_entry_enabled and (
                         p.max_re_entries is None or state.re_entry_count < p.max_re_entries
                     ):
+                        # Re-entry trigger = adaptive low + re_entry_gap (not TP2 trail price).
                         state.wait_reentry_side = "PUT"
-                        state.reentry_anchor = trail_tp
+                        state.reentry_anchor = extreme
                         state.reentry_cycle_base = extreme
+                        state.adaptive_low = min(state.adaptive_low or extreme, extreme)
                         state.re_entry_count += 1
                     else:
                         state.wait_reentry_side = None
@@ -773,11 +777,12 @@ def process_bar(
         return state, signals
 
     if state.wait_reentry_side == "CALL" and p.call_enabled:
-        anchor = float(state.reentry_anchor or 0)
-        cbase = float(state.reentry_cycle_base or base)
-        re_trig = anchor - p.re_entry_gap
+        # ADP high − gap (live adaptive high keeps ratcheting after TP2).
+        adp = float(state.adaptive_high or state.reentry_cycle_base or state.reentry_anchor or 0)
+        cbase = float(state.reentry_cycle_base or adp or base)
+        re_trig = adp - p.re_entry_gap
         re_sl = cycle_sl("CALL", cbase, p)
-        if anchor > 0 and re_trig > re_sl and crossed_down(prev, lo, re_trig):
+        if adp > 0 and re_trig > re_sl and crossed_down(prev, lo, re_trig):
             cid = state.next_cycle_id
             state.next_cycle_id += 1
             sig = _mk_open_signal(
@@ -809,11 +814,12 @@ def process_bar(
             return state, signals
 
     if state.wait_reentry_side == "PUT" and p.put_enabled:
-        anchor = float(state.reentry_anchor or 0)
-        cbase = float(state.reentry_cycle_base or base)
-        re_trig = anchor + p.re_entry_gap
+        # ADP low + gap (live adaptive low keeps ratcheting after TP2).
+        adp = float(state.adaptive_low or state.reentry_cycle_base or state.reentry_anchor or 0)
+        cbase = float(state.reentry_cycle_base or adp or base)
+        re_trig = adp + p.re_entry_gap
         re_sl = cycle_sl("PUT", cbase, p)
-        if anchor > 0 and re_trig < re_sl and crossed_up(prev, hi, re_trig):
+        if adp > 0 and re_trig < re_sl and crossed_up(prev, hi, re_trig):
             cid = state.next_cycle_id
             state.next_cycle_id += 1
             sig = _mk_open_signal(

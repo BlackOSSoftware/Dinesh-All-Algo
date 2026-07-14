@@ -153,7 +153,7 @@ export function StrategyView() {
       <PremiumCard className="!p-4">
         <CardTitle title="Re-entry & Risk" subtitle="Second-chance entries and forced exit" />
         <div className="grid gap-3 sm:grid-cols-2">
-          <FloatingField id="set-reentry-gap" label="Re-entry Gap" help={SETTINGS_HELP.reEntryGap} type="number" value={displayField(d.reEntryGap, d.bootDone)} placeholder="45" onChange={(v) => patchInt(v, d.setReEntryGap)} />
+          <FloatingField id="set-reentry-gap" label="Re-entry Gap" help={SETTINGS_HELP.reEntryGap} type="number" value={displayField(d.reEntryGap, d.bootDone)} placeholder="70" onChange={(v) => patchInt(v, d.setReEntryGap)} />
           <FloatingField id="set-auto-sq" label="Auto Square-Off Time" help={SETTINGS_HELP.autoSquareOff} type="time" value={displayTime(d.autoSquareOffTime, d.bootDone)} onChange={(v) => d.setAutoSquareOffTime(v)} />
         </div>
       </PremiumCard>

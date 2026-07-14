@@ -72,7 +72,7 @@ export const STRATEGY_SPEC_DEFAULTS = {
   firstEntryTp1: 70,
   avgTp1: 45,
   tp2Trail: 30,
-  reEntryGap: 45,
+  reEntryGap: 70,
   reEntryEnabled: true,
   firstEntryEnabled: true,
   callEnabled: true,
@@ -155,7 +155,7 @@ export function buildCalculatedTradeRows(
           tp1: null,
           tp2Trail: params.tp2Trail,
           stoploss: null,
-          status: `After TP2 · ${params.reEntryGap}pt pullback`,
+          status: `After TP2 · ADP high − ${params.reEntryGap}pt`,
           side: "CALL",
           editableLots: false,
         });
@@ -169,7 +169,7 @@ export function buildCalculatedTradeRows(
           tp1: null,
           tp2Trail: params.tp2Trail,
           stoploss: null,
-          status: `After TP2 · ${params.reEntryGap}pt pullback`,
+          status: `After TP2 · ADP low + ${params.reEntryGap}pt`,
           side: "PUT",
           editableLots: false,
         });
