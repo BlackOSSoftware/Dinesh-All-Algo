@@ -10,7 +10,7 @@ import {
 import { EMPTY_DASHBOARD, type DashboardSnapshot } from "@/lib/strategy2/types";
 
 const SNAPSHOT_KEY = "strategy2_dashboard_snapshot";
-const HEALTH_MS = 3000;
+const HEALTH_MS = 8000;
 
 function loadCachedSnapshot(): DashboardSnapshot | null {
   if (typeof window === "undefined") return null;
@@ -43,6 +43,7 @@ export function useStrategy2Dashboard(pollMs = 1000) {
   const [serverOnline, setServerOnline] = useState(true);
   const completedClearPendingRef = useRef(false);
   const serverOnlineRef = useRef(true);
+  const inFlightRef = useRef(false);
 
   const cacheSnapshot = useCallback((snap: DashboardSnapshot) => {
     try {
@@ -53,7 +54,8 @@ export function useStrategy2Dashboard(pollMs = 1000) {
   }, []);
 
   const refresh = useCallback(async () => {
-    if (!serverOnlineRef.current) return;
+    if (!serverOnlineRef.current || inFlightRef.current) return;
+    inFlightRef.current = true;
     try {
       const snap = await fetchDashboard();
       const next =
@@ -69,6 +71,7 @@ export function useStrategy2Dashboard(pollMs = 1000) {
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load dashboard");
     } finally {
+      inFlightRef.current = false;
       setLoading(false);
     }
   }, [cacheSnapshot]);

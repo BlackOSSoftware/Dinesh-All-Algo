@@ -1,4 +1,4 @@
-"""Fetch MCX LTP quotes via Angel SmartAPI (LTP-only, never OHLC close)."""
+﻿"""Fetch MCX LTP quotes via Angel SmartAPI (LTP-only, never OHLC close)."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from app.services.mcx_instruments import McxInstrument, load_mcx_instruments
 LOG = logging.getLogger(__name__)
 
 _CACHE: dict[str, tuple[float, float, bool, str, str]] = {}
-_CACHE_TTL_SEC = 0.5
+_CACHE_TTL_SEC = 1.0
 _LTP_DISK_PATH = BACKEND_ROOT / "instance" / "mcx_last_ltp.json"
 
 _LTP_KEYS = ("ltp", "LTP", "lastTradePrice", "lasttradeprice", "LastTradePrice", "lastPrice")
@@ -305,7 +305,7 @@ def _results_from_memory_cache(instruments: list[McxInstrument], now: float) -> 
         for inst in instruments
         if inst.configured and inst.key in _CACHE
     ] + [
-        _quote_from_cache(inst.key, inst, error="Could not resolve MCX token — check Angel login")
+        _quote_from_cache(inst.key, inst, error="Could not resolve MCX token - check Angel login")
         for inst in instruments
         if not inst.configured
     ]
@@ -350,7 +350,7 @@ def _fetch_all_mcx_quotes_locked() -> list[QuoteResult]:
                 _quote_from_cache(
                     inst.key,
                     inst,
-                    error="Could not resolve MCX token — check Angel login",
+                    error="Could not resolve MCX token - check Angel login",
                 )
             )
 
@@ -385,6 +385,17 @@ def ensure_angel_session_for_quotes(*, reason: str = "ensure_session") -> bool:
 
 
 def fetch_all_mcx_quotes() -> list[QuoteResult]:
+    # Fast path: serve memory cache without waiting on an in-flight Angel fetch.
+    try:
+        instruments = list(load_mcx_instruments().values())
+        now = time.monotonic()
+        cached = _results_from_memory_cache(instruments, now)
+        if cached is not None:
+            return cached
+        if _last_results and (now - _last_fetch_mono) < _CACHE_TTL_SEC:
+            return list(_last_results)
+    except Exception:  # noqa: BLE001
+        pass
     with _fetch_lock:
         return _fetch_all_mcx_quotes_locked()
 

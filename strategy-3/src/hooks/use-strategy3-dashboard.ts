@@ -10,8 +10,8 @@ import {
 import { EMPTY_DASHBOARD, type DashboardSnapshot } from "@/lib/strategy3/types";
 
 const SNAPSHOT_KEY = "strategy3_dashboard_snapshot";
-const HEALTH_MS = 3000;
-const POLL_MS = 2500;
+const HEALTH_MS = 8000;
+const POLL_MS = 1000;
 
 function loadCachedSnapshot(): DashboardSnapshot | null {
   if (typeof window === "undefined") return null;
@@ -41,6 +41,7 @@ export function useStrategy3Dashboard() {
   const [serverOnline, setServerOnline] = useState(true);
   const completedClearPendingRef = useRef(false);
   const serverOnlineRef = useRef(true);
+  const inFlightRef = useRef(false);
 
   const cacheSnapshot = useCallback((data: DashboardSnapshot) => {
     try {
@@ -51,7 +52,8 @@ export function useStrategy3Dashboard() {
   }, []);
 
   const refresh = useCallback(async () => {
-    if (!serverOnlineRef.current) return;
+    if (!serverOnlineRef.current || inFlightRef.current) return;
+    inFlightRef.current = true;
     try {
       const data = await fetchDashboard();
       const next =
@@ -67,6 +69,7 @@ export function useStrategy3Dashboard() {
     } catch (e) {
       setError(e instanceof Error ? e.message : "Dashboard load failed");
     } finally {
+      inFlightRef.current = false;
       setLoading(false);
     }
   }, [cacheSnapshot]);

@@ -1,4 +1,4 @@
-"""
+﻿"""
 Shared index LTP fetch for trading engine (throttled; respects Angel rate limits).
 """
 
@@ -71,7 +71,7 @@ def _ltp_from_row(row: dict[str, Any] | None) -> float | None:
     return None
 
 
-def get_index_ltp_cached(ttl_sec: float = 1.4) -> tuple[float | None, str | None, bool]:
+def get_index_ltp_cached(ttl_sec: float = 1.0) -> tuple[float | None, str | None, bool]:
     """
     Returns (ltp, detail_message, market_ok).
     """

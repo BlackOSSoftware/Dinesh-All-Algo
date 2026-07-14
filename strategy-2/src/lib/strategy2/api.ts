@@ -9,16 +9,33 @@ async function apiFetch(path: string, init?: RequestInit) {
   if (!headers.has("Content-Type") && init?.body) {
     headers.set("Content-Type", "application/json");
   }
-  const res = await fetch(`${getApiBase()}${path}`, { ...init, headers, cache: "no-store" });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const msg =
-      (data as { detail?: string; error?: string }).detail ||
-      (data as { error?: string }).error ||
-      `Request failed (${res.status})`;
-    throw new Error(msg);
+  const controller = new AbortController();
+  const timeoutMs = path.includes("/dashboard") ? 12000 : 30000;
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(`${getApiBase()}${path}`, {
+      ...init,
+      headers,
+      cache: "no-store",
+      signal: controller.signal,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const msg =
+        (data as { detail?: string; error?: string }).detail ||
+        (data as { error?: string }).error ||
+        `Request failed (${res.status})`;
+      throw new Error(msg);
+    }
+    return data;
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") {
+      throw new Error("Request timed out — backend may be busy refreshing Angel session. Retrying…");
+    }
+    throw err;
+  } finally {
+    window.clearTimeout(timer);
   }
-  return data;
 }
 
 export async function fetchDashboard(): Promise<DashboardSnapshot> {

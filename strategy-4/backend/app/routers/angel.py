@@ -1,5 +1,5 @@
-"""
-Angel One live market quote — proxied through backend so keys stay server-side.
+﻿"""
+Angel One live market quote â€” proxied through backend so keys stay server-side.
 
 Browser calls GET /angel/live-quote with **Indian Algo** JWT only.
 Angel `jwt_token` + `api_key` come from `backend/.env` (see `.env.example`).
@@ -29,14 +29,14 @@ LOG = logging.getLogger(__name__)
 router = APIRouter(prefix="/angel", tags=["angel"])
 
 _CACHE: dict[str, Any] = {"t": 0.0, "payload": None}
-_CACHE_TTL_SEC = 0.85  # Keep live price responsive while still coalescing duplicate dashboard polls.
+_CACHE_TTL_SEC = 1.0  # Keep live price responsive while still coalescing duplicate dashboard polls.
 
 _START_BAR_CACHE: dict[str, Any] = {"t": 0.0, "key": "", "payload": None}
 _START_BAR_CACHE_TTL_SEC = 180.0  # Start-bar for "today" changes rarely; eases candle API pressure.
 _LAST_SESSION_LOOKBACK_DAYS = 10
 
 _HIST_DAY_CACHE: dict[str, tuple[float, dict[str, Any] | None]] = {}
-_HIST_DAY_CACHE_TTL_SEC = 600.0  # 10 min per date — speeds repeat backtests
+_HIST_DAY_CACHE_TTL_SEC = 600.0  # 10 min per date â€” speeds repeat backtests
 _HIST_DAY_CACHE_MAX = 1200
 
 _INTERVAL_MAP = {

@@ -40,9 +40,8 @@ from app.services.grid_logic import (
     session_reference_price,
 )
 from app.services.grid_backtest import run_grid_backtest
-from app.services.mcx_instruments import get_instrument
+from app.services.mcx_scrip_resolver import list_mcx_future_expiries, peek_cached_symbol_for_expiry
 from app.services.mcx_quotes import fetch_all_mcx_quotes, get_quote_by_key, quote_from_results
-from app.services.mcx_scrip_resolver import list_mcx_future_expiries
 from app.services.trading_engine import _angel_headers, manual_close_leg
 
 router = APIRouter(prefix="/trading", tags=["trading"])
@@ -244,13 +243,11 @@ def get_dashboard(user: User = Depends(get_current_user), db: Session = Depends(
     ]
 
     active_expiry = resolve_active_expiry(cfg, as_of=now)
-    instrument = get_instrument(parsed["market"], expiry_iso=active_expiry or None)
-    active_symbol = ""
-    if instrument and instrument.tradingsymbol:
-        active_symbol = instrument.tradingsymbol
-    elif selected and getattr(selected, "tradingsymbol", ""):
-        active_symbol = str(selected.tradingsymbol)
     active_side = "Short Sell" if resolve_invert_grid(cfg, as_of=now) else "Buy Side"
+    # Never block dashboard on Angel searchScrip / scrip-master.
+    active_symbol = peek_cached_symbol_for_expiry(parsed["market"], active_expiry)
+    if not active_symbol and selected and getattr(selected, "tradingsymbol", ""):
+        active_symbol = str(selected.tradingsymbol)
 
     position_lots = int(runtime.get("positionLots") or 0)
     avg_entry = float(runtime.get("avgEntryPrice") or 0)

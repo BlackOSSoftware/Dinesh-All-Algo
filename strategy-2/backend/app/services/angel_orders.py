@@ -177,6 +177,9 @@ def search_scrip(
     searchscrip: str,
     timeout_sec: float = 20.0,
 ) -> dict[str, Any]:
+    from app.services.angel_upstream_gate import acquire_angel_upstream_slot
+
+    acquire_angel_upstream_slot()
     body = {"exchange": exchange.upper(), "searchscrip": searchscrip}
     h = _headers(
         api_key=api_key,

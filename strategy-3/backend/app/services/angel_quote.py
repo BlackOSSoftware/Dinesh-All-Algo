@@ -1,5 +1,5 @@
-"""
-Angel One SmartAPI — Live Market Quote (POST market/v1/quote/).
+﻿"""
+Angel One SmartAPI â€” Live Market Quote (POST market/v1/quote/).
 
 Docs: https://apiconnect.angelone.in/rest/secure/angelbroking/market/v1/quote/
 Uses headers as per official samples (X-PrivateKey, Bearer jwt, client IP/MAC, etc.).
@@ -123,7 +123,7 @@ def post_market_quote(
                         _retry_depth=_retry_depth + 1,
                     )
             if _angel_403_is_rate(err_body):
-                time.sleep(2.6)
+                time.sleep(1.15)
                 return post_market_quote(
                     api_key=api_key,
                     jwt_token=jwt_token,

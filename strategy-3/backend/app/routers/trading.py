@@ -55,8 +55,25 @@ def _iso(dt: Any) -> str | None:
     return str(dt)
 
 
+_SENSEX_DASH_CACHE: dict[str, Any] = {"t": 0.0, "price": 0.0, "open": False, "source": "unconfigured", "err": None}
+_SENSEX_DASH_TTL_SEC = 1.0
+
+
 def _sensex_from_quote() -> tuple[float, bool, str, str | None]:
     from app.config import settings
+    import time as _time
+
+    now = _time.monotonic()
+    if (
+        float(_SENSEX_DASH_CACHE["price"] or 0) > 0
+        and now - float(_SENSEX_DASH_CACHE["t"] or 0) < _SENSEX_DASH_TTL_SEC
+    ):
+        return (
+            float(_SENSEX_DASH_CACHE["price"]),
+            bool(_SENSEX_DASH_CACHE["open"]),
+            str(_SENSEX_DASH_CACHE["source"]),
+            _SENSEX_DASH_CACHE["err"],
+        )
 
     raw = fetch_sensex_live_quote(
         exchange_tokens=settings_parsed_tokens(),
@@ -75,6 +92,9 @@ def _sensex_from_quote() -> tuple[float, bool, str, str | None]:
             pass
     source = str(row.get("quote_source") or "live")
     err = raw.get("angel_message") if not raw.get("angel_ok") else None
+    _SENSEX_DASH_CACHE.update(
+        {"t": now, "price": price, "open": bool(raw.get("market_open")), "source": source, "err": err}
+    )
     return float(price), bool(raw.get("market_open")), source, err
 
 

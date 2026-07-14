@@ -138,7 +138,8 @@ def load_mcx_instruments() -> dict[str, McxInstrument]:
     for key, inst in list(out.items()):
         if inst.configured:
             continue
-        resolved = resolve_mcx_instrument(key)
+        # Disk/stale cache only on hot path — never block quotes on Angel/master downloads.
+        resolved = resolve_mcx_instrument(key, allow_slow=False)
         if not resolved:
             continue
         out[key] = McxInstrument(
@@ -168,4 +169,16 @@ def get_instrument(key: str | None, *, expiry_iso: str | None = None) -> McxInst
                 tradingsymbol=str(resolved.get("tradingsymbol") or ""),
                 lotsize=max(1, int(resolved.get("lotsize") or 1)),
             )
+        # Fall back to front-month cache without slow master download.
+        resolved = resolve_mcx_instrument(k, allow_slow=False)
+        if resolved:
+            return McxInstrument(
+                key=k,
+                label=str(resolved.get("label") or k.replace("_", " ").title()),
+                exchange=str(resolved.get("exchange") or "MCX"),
+                token=str(resolved.get("token") or ""),
+                tradingsymbol=str(resolved.get("tradingsymbol") or ""),
+                lotsize=max(1, int(resolved.get("lotsize") or 1)),
+            )
+        return None
     return load_mcx_instruments().get(k)

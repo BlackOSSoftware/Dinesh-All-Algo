@@ -1,5 +1,5 @@
-"""
-Angel One SmartAPI — Historical candle (POST historical/v1/getCandleData).
+﻿"""
+Angel One SmartAPI â€” Historical candle (POST historical/v1/getCandleData).
 Used for session start bar close (e.g. first 1m candle at 09:15 IST).
 """
 
@@ -124,7 +124,7 @@ def post_get_candle_data(
                         _retry_depth=_retry_depth + 1,
                     )
             if _angel_403_is_rate(err_body):
-                time.sleep(2.6)
+                time.sleep(1.15)
                 return post_get_candle_data(
                     api_key=api_key,
                     jwt_token=jwt_token,

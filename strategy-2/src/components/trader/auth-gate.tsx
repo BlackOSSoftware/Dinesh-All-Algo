@@ -19,17 +19,16 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
 
     async function checkSession() {
       const token = getStoredToken();
+      // Paint immediately when a stored token exists — validate in background.
       if (token) {
+        setState("authenticated");
         try {
           const res = await fetch(`${getApiBase()}/users/me`, {
             headers: { Authorization: `Bearer ${token}` },
             cache: "no-store",
           });
           if (!alive) return;
-          if (res.ok) {
-            setState("authenticated");
-            return;
-          }
+          if (res.ok) return;
           if (res.status === 401) {
             localStorage.removeItem("indian_algo_token");
           }
@@ -49,7 +48,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
           setState("guest");
         }
       } catch {
-        if (alive) setState("guest");
+        if (alive) setState(token ? "authenticated" : "guest");
       }
     }
 
@@ -85,6 +84,10 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
       }
       setStoredToken(data.access_token);
       setState("authenticated");
+      // Backend also refreshes Angel on login; kick UI path so Generate Token / quotes recover faster.
+      void import("@/lib/angel-session")
+        .then(({ refreshAngelSession }) => refreshAngelSession())
+        .catch(() => undefined);
     } catch (err) {
       const reason = err instanceof Error ? err.message : "Network error";
       setError(
