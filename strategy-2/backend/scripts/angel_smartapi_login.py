@@ -142,7 +142,12 @@ def main() -> int:
         import pyotp
         from SmartApi.smartConnect import SmartConnect
     except ImportError as e:
-        print("pip install smartapi-python pyotp logzero websocket-client", file=sys.stderr)
+        print(
+            "Missing Angel login packages in this Python "
+            f"({sys.executable}). Run: "
+            f'"{sys.executable}" -m pip install smartapi-python pyotp logzero websocket-client python-dotenv',
+            file=sys.stderr,
+        )
         print(e, file=sys.stderr)
         return 1
 

@@ -55,15 +55,63 @@ def verify_angel_login_paths() -> tuple[bool, list[str]]:
     return (len(errs) == 0, errs)
 
 
+def _python_supports_angel_login(py: str) -> bool:
+    """True when this interpreter can import SmartAPI login deps."""
+    try:
+        proc = subprocess.run(
+            [
+                py,
+                "-c",
+                "import SmartApi.smartConnect; import pyotp; from dotenv import load_dotenv",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=45,
+            encoding="utf-8",
+            errors="replace",
+        )
+        return proc.returncode == 0
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def login_python_command(root: Path | None = None) -> list[str]:
-    """Prefer backend venv; fallback to the current Python executable."""
+    """
+    Prefer a Python that actually has smartapi-python/pyotp.
+
+    VPS note: an empty/broken backend/.venv often exists while uvicorn runs under
+    another interpreter — always probing first avoids false "script exit 1".
+    """
     r = root or backend_root()
-    py = venv_python_path(r)
-    if py.is_file():
-        return [str(py)]
+    candidates: list[str] = []
     if sys.executable:
+        candidates.append(sys.executable)
+    vpy = venv_python_path(r)
+    if vpy.is_file():
+        candidates.append(str(vpy))
+    candidates.extend(["python3", "python"])
+
+    seen: set[str] = set()
+    for cand in candidates:
+        key = cand.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        if _python_supports_angel_login(cand):
+            LOG.info("%s Using Angel login interpreter: %s", SCHED_PREFIX, cand)
+            return [cand]
+
+    # Last resort — previous behaviour (may still fail with a clear ImportError).
+    if sys.executable:
+        LOG.warning(
+            "%s No interpreter passed SmartAPI import probe; falling back to %s",
+            SCHED_PREFIX,
+            sys.executable,
+        )
         return [sys.executable]
-    return ["python"]
+    if vpy.is_file():
+        return [str(vpy)]
+    return ["python3"]
 
 
 def _mask_jwt_in_log(text: str) -> str:
@@ -81,9 +129,57 @@ def _clear_quote_caches() -> None:
     angel_router.clear_angel_caches()
 
 
+def _login_subprocess_env(root: Path) -> dict[str, str]:
+    """Build child env; inject ANGEL_* from backend/.env so VPS systemd env cannot blank them."""
+    env = {**os.environ}
+    env_path = root / ".env"
+    if not env_path.is_file():
+        return env
+    try:
+        from dotenv import dotenv_values
+
+        vals = dotenv_values(env_path)
+    except Exception:  # noqa: BLE001
+        return env
+    for key, val in vals.items():
+        if not key or val is None:
+            continue
+        text = str(val).strip()
+        if not text:
+            continue
+        if key.startswith("ANGEL_") or key in {"JWT_SECRET", "DATABASE_URL"}:
+            env[key] = text
+    return env
+
+
+def _format_script_failure(rc: int, stdout: str, stderr: str) -> str:
+    """Surface real script failure reason (not just 'script exit 1')."""
+    lines: list[str] = []
+    for line in (stderr or "").splitlines() + (stdout or "").splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        # Skip SmartAPI/logzero noise that is written to stderr even on success.
+        if "in pool" in s.lower():
+            continue
+        if re.search(r"\[I\s+\d+", s):
+            continue
+        lines.append(s)
+    detail = " | ".join(lines[-8:]) if lines else ""
+    detail = _mask_jwt_in_log(detail).strip()
+    if detail:
+        return f"script exit {rc}: {detail}"
+    return (
+        f"script exit {rc} (no details). "
+        "On VPS: pip install -r requirements.txt in the same Python as uvicorn, "
+        "and ensure ANGEL_API_KEY / ANGEL_CLIENT_ID / ANGEL_PIN / ANGEL_TOTP_SECRET are in backend/.env"
+    )
+
+
 def run_angel_smartapi_login_subprocess(*, reason: str) -> tuple[bool, str, str, int]:
     """
-    Run angel_smartapi_login.py with venv Python. Returns (success, stdout, stderr, returncode).
+    Run angel_smartapi_login.py with a Python that has SmartAPI installed.
+    Returns (success, stdout, stderr, returncode).
     Never raises — errors are captured in stderr / returncode.
     """
     root = backend_root()
@@ -94,29 +190,31 @@ def run_angel_smartapi_login_subprocess(*, reason: str) -> tuple[bool, str, str,
         return False, "", msg, 127
     py_cmd = login_python_command(root)
 
-    LOG.info("%s Running Angel One login refresh... (%s)", SCHED_PREFIX, reason)
+    LOG.info("%s Running Angel One login refresh... (%s) py=%s", SCHED_PREFIX, reason, py_cmd[0])
     try:
         proc = subprocess.run(
             [*py_cmd, str(script)],
-            cwd=str(root / "scripts"),
+            cwd=str(root),
             capture_output=True,
             text=True,
             timeout=120,
-            env={**os.environ},
+            env=_login_subprocess_env(root),
+            encoding="utf-8",
+            errors="replace",
         )
         out = proc.stdout or ""
         err = proc.stderr or ""
-        LOG.debug("%s angel_smartapi_login.py stdout:\n%s", SCHED_PREFIX, _mask_jwt_in_log(out) or "(empty)")
-        LOG.debug("%s angel_smartapi_login.py stderr:\n%s", SCHED_PREFIX, _mask_jwt_in_log(err) or "(empty)")
+        LOG.info("%s angel_smartapi_login.py stdout:\n%s", SCHED_PREFIX, _mask_jwt_in_log(out) or "(empty)")
+        if err.strip():
+            LOG.info("%s angel_smartapi_login.py stderr:\n%s", SCHED_PREFIX, _mask_jwt_in_log(err) or "(empty)")
         ok = proc.returncode == 0
         if ok:
             LOG.info("%s angel_smartapi_login.py completed (exit 0)", SCHED_PREFIX)
         else:
             LOG.error(
-                "%s Login refresh failed: exit_code=%s stderr=%s",
+                "%s Login refresh failed: %s",
                 SCHED_PREFIX,
-                proc.returncode,
-                _mask_jwt_in_log((err or "")[-500:]) or "(empty)",
+                _format_script_failure(proc.returncode, out, err),
             )
         return ok, out, err, proc.returncode
     except subprocess.TimeoutExpired as e:
@@ -147,6 +245,15 @@ def apply_jwt_from_env_file() -> bool:
         changed,
     )
     return True
+
+
+def apply_jwt_from_script_output(stdout: str = "") -> bool:
+    """
+    Compatibility wrapper: login script writes tokens into backend/.env.
+    Callers historically expected JWT parsed from stdout; reload from .env instead.
+    """
+    _ = stdout  # retained for call-site compatibility
+    return apply_jwt_from_env_file()
 
 
 def _sync_login_job(reason: str, allow_retry: bool) -> None:
@@ -269,12 +376,12 @@ def trigger_manual_angel_login() -> dict[str, Any]:
     ok, errs = verify_angel_login_paths()
     if not ok:
         return {"ok": False, "error": "; ".join(errs)}
-    ok_run, _stdout, stderr, rc = run_angel_smartapi_login_subprocess(reason="manual")
+    ok_run, stdout, stderr, rc = run_angel_smartapi_login_subprocess(reason="manual")
     if not ok_run:
         return {
             "ok": False,
-            "error": f"script exit {rc}",
-            "stderr_tail": (stderr or "")[-2000:],
+            "error": _format_script_failure(rc, stdout, stderr),
+            "stderr_tail": _mask_jwt_in_log((stderr or "")[-2000:]),
         }
     if not apply_jwt_from_env_file():
         return {"ok": False, "error": "script ran but ANGEL_JWT_TOKEN was not reloaded from backend/.env"}

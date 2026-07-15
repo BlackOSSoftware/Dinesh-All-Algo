@@ -104,6 +104,7 @@ export async function refreshAngelSession(): Promise<RefreshResult> {
       ok?: boolean;
       message?: string;
       error?: string;
+      stderr_tail?: string;
     };
     if (res.status === 401 || res.status === 403) {
       return { ok: false, error: "Login required before refreshing Angel session." };
@@ -114,10 +115,15 @@ export async function refreshAngelSession(): Promise<RefreshResult> {
         message: typeof data.message === "string" ? data.message : "Angel session refreshed.",
       };
     }
-    return {
-      ok: false,
-      error: typeof data.error === "string" ? data.error : `Request failed (HTTP ${res.status})`,
-    };
+    const primary =
+      typeof data.error === "string" && data.error.trim()
+        ? data.error.trim()
+        : `Request failed (HTTP ${res.status})`;
+    const tail =
+      typeof data.stderr_tail === "string" && data.stderr_tail.trim() && !primary.includes(data.stderr_tail.trim())
+        ? ` — ${data.stderr_tail.trim().slice(-500)}`
+        : "";
+    return { ok: false, error: `${primary}${tail}` };
   } catch {
     return { ok: false, error: "Network error while refreshing Angel session." };
   }
