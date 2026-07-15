@@ -19,6 +19,7 @@ from app.services import angel_orders
 from app.services import trading_repository as tr
 from app.services.breakout_backtest import _fetch_day_candles
 from app.services.breakout_logic import (
+    align_runtime_to_config,
     find_reference_candle,
     fresh_breakout_runtime,
     load_runtime,
@@ -146,8 +147,14 @@ def _ensure_daily_session(cfg: dict[str, Any], runtime: dict[str, Any]) -> dict[
 
 
 def _maybe_set_reference(db, user_id: int, cfg: dict[str, Any], runtime: dict[str, Any], parsed: dict[str, Any], instrument) -> dict[str, Any]:
+    # Stale lock from another instrument (e.g. NG ref while Crude selected) must refetch.
     if _num(runtime.get("referencePrice")) > 0:
-        return runtime
+        rt_market = str(runtime.get("market") or "").upper()
+        want_market = str(parsed.get("market") or "").upper()
+        if (not rt_market or not want_market or rt_market == want_market) and str(
+            runtime.get("phase") or ""
+        ) not in ("WAIT_REF", "IDLE"):
+            return runtime
 
     phase = str(runtime.get("phase") or "")
     if phase not in ("IDLE", "WAIT_REF", "WAIT_BREAKOUT"):
@@ -167,7 +174,7 @@ def _maybe_set_reference(db, user_id: int, cfg: dict[str, Any], runtime: dict[st
         rt["message"] = "MCX instrument token/symbol not configured — cannot fetch reference candle"
         return rt
 
-    key = f"{user_id}:{_session_date()}"
+    key = f"{user_id}:{_session_date()}:{parsed['market']}"
     # Don't starve WAIT_BREAKOUT: only throttle Angel history calls, and keep retrying
     # until a reference candle is actually locked in.
     last_fetch = _REF_FETCH_AT.get(key, 0)
@@ -185,7 +192,25 @@ def _maybe_set_reference(db, user_id: int, cfg: dict[str, Any], runtime: dict[st
         )
         ref = find_reference_candle(candles, parsed["start_time"])
         if ref:
+            close = _num(ref.get("close"))
+            quote_px = 0.0
+            try:
+                q = get_quote_by_key(parsed["market"])
+                quote_px = float(q.price if q else 0)
+            except Exception:  # noqa: BLE001
+                quote_px = 0.0
+            from app.services.breakout_logic import _reference_matches_ltp
+
+            if quote_px > 0 and close > 0 and not _reference_matches_ltp(close, quote_px):
+                rt = copy.copy(runtime)
+                rt["phase"] = "WAIT_REF"
+                rt["message"] = (
+                    f"Ignored bad reference close {close:.2f} for {instrument.tradingsymbol} "
+                    f"(LTP {quote_px:.2f}) — retrying"
+                )
+                return rt
             rt = set_reference_from_candle(runtime, ref, parsed)
+            rt["refSymbol"] = instrument.tradingsymbol
             tr.append_trading_log(
                 db,
                 user_id=user_id,
@@ -193,7 +218,7 @@ def _maybe_set_reference(db, user_id: int, cfg: dict[str, Any], runtime: dict[st
                 leg="REF",
                 action="REFERENCE_SET",
                 symbol=instrument.tradingsymbol,
-                entry_price=_num(ref.get("close")),
+                entry_price=close,
                 message=str(rt.get("message") or "")[:900],
             )
             return rt
@@ -244,6 +269,7 @@ def _sync_position(
             range_level=fill,
             strike=fill,
             tp=float(action.get("tpPrice") or 0) or None,
+            put_sl_pts=int(float(action.get("slPrice") or 0) or 0) or None,
             lots=lots,
             quantity=lots * int(instrument.lotsize or 1),
             entry_price=fill,
@@ -281,6 +307,12 @@ def process_user_tick(db, user_id: int) -> None:
     price = float(quote.price if quote else 0)
     runtime = load_runtime(cfg)
     runtime = _ensure_daily_session(cfg, runtime)
+    runtime = align_runtime_to_config(
+        runtime,
+        parsed,
+        symbol=instrument.tradingsymbol or "",
+        last_price=price,
+    )[0]
     loaded_runtime = copy.deepcopy(runtime)
 
     cached = _TICK_PRICE.get(user_id)
@@ -464,7 +496,7 @@ async def _engine_loop() -> None:
         except Exception as exc:  # noqa: BLE001
             LOG.exception("[BreakoutEngine] loop error: %s", exc)
         try:
-            await asyncio.wait_for(_STOP.wait(), timeout=0.5)
+            await asyncio.wait_for(_STOP.wait(), timeout=0.05)
         except asyncio.TimeoutError:
             pass
     LOG.info("[BreakoutEngine] stopped")

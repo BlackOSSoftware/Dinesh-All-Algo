@@ -29,6 +29,7 @@ from app.schemas import (
 from app.services import angel_orders
 from app.services import trading_repository as tr
 from app.services.breakout_logic import (
+    align_runtime_to_config,
     build_strategy_levels,
     dashboard_snapshot_fields,
     describe_breakout_next_action,
@@ -84,9 +85,14 @@ def put_trading_settings(
 
     merged_config = None
     prev_leg_mode: str | None = None
+    prev_market = ""
+    prev_start = ""
     if body.config is not None:
         existing = tr.load_config_dict(db, user.id)
         prev_leg_mode = str(existing.get("legEntryMode") or "once").strip().lower()
+        prev_parsed = parse_strategy_config(existing)
+        prev_market = str(prev_parsed.get("market") or "")
+        prev_start = str(prev_parsed.get("start_time") or "")
         merged_config = {**existing, **body.config}
 
     tr.save_strategy_settings(
@@ -124,6 +130,28 @@ def put_trading_settings(
             message=f"Trading mode set to {new_mode}",
         )
 
+    if merged_config is not None:
+        new_parsed = parse_strategy_config(tr.load_config_dict(db, user.id))
+        new_market = str(new_parsed.get("market") or "")
+        new_start = str(new_parsed.get("start_time") or "")
+        if (prev_market and new_market and prev_market != new_market) or (
+            prev_start and new_start and prev_start != new_start
+        ):
+            # Market/start changed — drop stale NG/Crude reference so dashboard arms the selected instrument.
+            quote = get_quote_by_key(new_market)
+            px = float(quote.price if quote and quote.price > 0 else 0)
+            open_pos = tr.list_open_positions(db, user.id)
+            if not open_pos:
+                tr.reset_algo_session(db, user.id, current_price=px)
+                tr.append_trading_log(
+                    db,
+                    user_id=user.id,
+                    mode=new_mode,
+                    leg="-",
+                    action="CONFIG_CHANGED",
+                    message=f"Market/start changed ({prev_market or '-'}@{prev_start or '-'} → {new_market}@{new_start}) — session re-armed",
+                )
+
     if merged_config is not None and prev_leg_mode is not None:
         nm = str(merged_config.get("legEntryMode") or "once").strip().lower()
         if nm != prev_leg_mode:
@@ -146,7 +174,6 @@ def get_dashboard(user: User = Depends(get_current_user), db: Session = Depends(
     cfg = tr.load_config_dict(db, user.id)
     parsed = parse_strategy_config(cfg)
     runtime = load_runtime(cfg)
-    snap = dashboard_snapshot_fields(runtime)
 
     quotes_raw = fetch_all_mcx_quotes()
     quotes = [
@@ -165,6 +192,21 @@ def get_dashboard(user: User = Depends(get_current_user), db: Session = Depends(
 
     selected = quote_from_results(quotes_raw, parsed["market"])
     current_price = float(selected.price if selected and selected.price > 0 else runtime.get("lastPrice") or 0)
+
+    aligned, aligned_changed = align_runtime_to_config(
+        runtime,
+        parsed,
+        symbol=(selected.tradingsymbol if selected else "") or "",
+        last_price=current_price,
+    )
+    if aligned_changed:
+        runtime = aligned
+        cfg["breakout_runtime"] = runtime
+        tr.save_strategy_settings(db, user.id, config=cfg)
+    else:
+        runtime = aligned
+
+    snap = dashboard_snapshot_fields(runtime)
 
     strategy_rows = build_strategy_levels(cfg, runtime)
     grid_levels = [
@@ -218,6 +260,8 @@ def get_dashboard(user: User = Depends(get_current_user), db: Session = Depends(
             range_level=r.range_level,
             strike=r.strike,
             tp=r.tp,
+            sl=float(r.put_sl_pts) if r.put_sl_pts else None,
+            lots=int(r.lots) if r.lots is not None else None,
             symbol=r.trading_symbol,
             entry_price=r.entry_price,
             exit_price=r.exit_price,
@@ -406,6 +450,8 @@ def list_completed_positions(
             range_level=r.range_level,
             strike=r.strike,
             tp=r.tp,
+            sl=float(r.put_sl_pts) if r.put_sl_pts else None,
+            lots=int(r.lots) if r.lots is not None else None,
             symbol=r.trading_symbol,
             entry_price=r.entry_price,
             exit_price=r.exit_price,

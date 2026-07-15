@@ -19,7 +19,7 @@ from app.services.mcx_instruments import McxInstrument, load_mcx_instruments
 LOG = logging.getLogger(__name__)
 
 _CACHE: dict[str, tuple[float, float, bool, str, str]] = {}
-_CACHE_TTL_SEC = 1.0
+_CACHE_TTL_SEC = 0.2
 _LTP_DISK_PATH = BACKEND_ROOT / "instance" / "mcx_last_ltp.json"
 
 _LTP_KEYS = ("ltp", "LTP", "lastTradePrice", "lasttradeprice", "LastTradePrice", "lastPrice")

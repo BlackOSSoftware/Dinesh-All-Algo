@@ -105,6 +105,95 @@ def fresh_breakout_runtime(*, session_date: str = "", last_price: float = 0.0) -
     return rt
 
 
+def _reference_matches_ltp(ref: float, ltp: float) -> bool:
+    """Reject stale refs from a different instrument (e.g. NG ~280 vs Crude ~7600)."""
+    if ref <= 0 or ltp <= 0:
+        return True
+    ratio = ref / ltp
+    return 0.4 <= ratio <= 2.5
+
+
+def align_runtime_to_config(
+    runtime: dict[str, Any],
+    parsed: dict[str, Any],
+    *,
+    symbol: str = "",
+    last_price: float = 0.0,
+) -> tuple[dict[str, Any], bool]:
+    """
+    Keep breakout runtime bound to the current settings market/start time.
+    Returns (runtime, changed) — changed=True when reference/session must re-arm.
+    """
+    rt = deepcopy(runtime)
+    market = str(parsed.get("market") or "").upper()
+    start = str(parsed.get("start_time") or "")
+    dist = float(parsed.get("breakout_distance") or 0)
+    rt_market = str(rt.get("market") or "").upper()
+    rt_start = str(rt.get("startTime") or "")
+    open_lots = int(rt.get("positionLots") or 0)
+    phase = str(rt.get("phase") or "")
+    in_trade = open_lots > 0 and phase in ("IN_TRADE", "REVERSE_TRADE")
+
+    if in_trade:
+        if market and not rt_market:
+            rt["market"] = market
+            return rt, True
+        return rt, False
+
+    mismatch = bool(rt_market and market and rt_market != market)
+    start_changed = bool(rt_start and start and rt_start != start)
+    bad_ref = bool(
+        _num(rt.get("referencePrice")) > 0
+        and last_price > 0
+        and not _reference_matches_ltp(_num(rt.get("referencePrice")), last_price)
+    )
+
+    if mismatch or start_changed or bad_ref:
+        reason = (
+            f"market {rt_market}->{market}"
+            if mismatch
+            else (f"start {rt_start}->{start}" if start_changed else "reference mismatch vs LTP")
+        )
+        session = str(rt.get("sessionDate") or "")
+        cleared = fresh_breakout_runtime(session_date=session, last_price=last_price or _num(rt.get("lastPrice")))
+        cleared["market"] = market
+        cleared["startTime"] = start
+        cleared["breakoutDistance"] = dist
+        cleared["refSymbol"] = symbol or ""
+        cleared["message"] = f"Settings changed ({reason}) — re-arming reference for {market or 'market'}"
+        return cleared, True
+
+    changed = False
+    # Same market: keep ref, but rebuild triggers if distance changed.
+    if _num(rt.get("referencePrice")) > 0 and dist > 0:
+        old_dist = _num(rt.get("breakoutDistance"))
+        if old_dist > 0 and abs(old_dist - dist) > 1e-9:
+            buy_trig, sell_trig = compute_triggers(_num(rt.get("referencePrice")), dist)
+            rt["buyTrigger"] = buy_trig
+            rt["sellTrigger"] = sell_trig
+            rt["breakoutDistance"] = dist
+            if phase == "WAIT_BREAKOUT":
+                rt["message"] = (
+                    f"Reference close {_num(rt.get('referencePrice')):.2f} · "
+                    f"Buy {buy_trig:.2f} · Sell {sell_trig:.2f}"
+                )
+            changed = True
+
+    if market and rt.get("market") != market:
+        rt["market"] = market
+        changed = True
+    if start and rt.get("startTime") != start:
+        rt["startTime"] = start
+        changed = True
+    if dist > 0 and abs(_num(rt.get("breakoutDistance")) - dist) > 1e-9:
+        rt["breakoutDistance"] = dist
+        changed = True
+    if symbol and rt.get("refSymbol") != symbol:
+        rt["refSymbol"] = symbol
+        changed = True
+    return rt, changed
+
+
 def load_runtime(cfg: dict[str, Any]) -> dict[str, Any]:
     rt = cfg.get("breakout_runtime")
     base = default_runtime()
@@ -141,6 +230,9 @@ def set_reference_from_candle(runtime: dict[str, Any], candle: dict[str, Any], p
             "buyTrigger": buy_trig,
             "sellTrigger": sell_trig,
             "refCandleTime": str(candle.get("time") or ""),
+            "market": str(parsed.get("market") or rt.get("market") or "").upper(),
+            "startTime": str(parsed.get("start_time") or rt.get("startTime") or ""),
+            "breakoutDistance": float(parsed.get("breakout_distance") or 0),
             "message": f"Reference close {ref:.2f} · Buy {buy_trig:.2f} · Sell {sell_trig:.2f}",
         }
     )

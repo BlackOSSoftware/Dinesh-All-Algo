@@ -12,39 +12,70 @@ import { setAlgoRunning, setTradingMode } from "@/lib/strategy4/api";
 import type { DashboardSnapshot, MarketQuote, TradingMode } from "@/lib/strategy4/types";
 import { cn } from "@/components/ui";
 
-function fmtPx(v: number) {
-  if (!Number.isFinite(v) || v === 0) return "—";
-  return v.toFixed(2);
+function fmtPx(v: number | null | undefined) {
+  if (v == null || !Number.isFinite(v) || v === 0) return "—";
+  return v.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-function fmtPnl(v: number) {
-  if (!Number.isFinite(v)) return "—";
+function fmtPnl(v: number | null | undefined) {
+  if (v == null || !Number.isFinite(v)) return "—";
   const sign = v > 0 ? "+" : "";
   return `${sign}${v.toFixed(2)}`;
 }
 
-function fmtDelta(v: number) {
-  if (!Number.isFinite(v)) return "—";
-  const sign = v > 0 ? "+" : "";
-  return `${sign}${v.toFixed(2)}`;
+function fmtTime(iso: string | null | undefined) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  return new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Kolkata",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(d);
+}
+
+function fmtDate(iso: string | null | undefined) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  return new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Kolkata",
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+  }).format(d);
 }
 
 function fmtDateTime(iso: string | null | undefined) {
   if (!iso) return "—";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "—";
-  const parts = new Intl.DateTimeFormat("en-GB", {
-    timeZone: "Asia/Kolkata",
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  }).formatToParts(d);
-  const get = (type: Intl.DateTimeFormatPartTypes) => parts.find((p) => p.type === type)?.value ?? "";
-  return `${get("day")}/${get("month")}/${get("year")} ${get("hour")}:${get("minute")}:${get("second")}`;
+  return `${fmtDate(iso)} ${fmtTime(iso)}`;
+}
+
+function durationLabel(entry: string | null | undefined, exit: string | null | undefined) {
+  if (!entry || !exit) return "—";
+  const a = new Date(entry).getTime();
+  const b = new Date(exit).getTime();
+  if (!Number.isFinite(a) || !Number.isFinite(b) || b < a) return "—";
+  const mins = Math.round((b - a) / 60000);
+  if (mins < 60) return `${mins}m`;
+  return `${Math.floor(mins / 60)}h ${mins % 60}m`;
+}
+
+function tradeLabel(leg: string, reverse?: boolean) {
+  const u = (leg || "").toUpperCase();
+  if (u === "REVERSE" || reverse) return "Reverse";
+  if (u === "MAIN" || u === "INITIAL") return "Initial";
+  return leg || "—";
+}
+
+function exitReasonLabel(reason: string | null | undefined) {
+  const r = (reason || "").toUpperCase();
+  if (r.includes("TP")) return "TP";
+  if (r.includes("SL")) return "SL";
+  return reason || "—";
 }
 
 function phaseLabel(phase: string | undefined) {
@@ -52,211 +83,18 @@ function phaseLabel(phase: string | undefined) {
     case "IDLE":
       return "Idle";
     case "WAIT_REF":
-      return "Waiting reference close";
+      return "Waiting reference";
     case "WAIT_BREAKOUT":
-      return "Armed — waiting breakout";
+      return "Waiting breakout";
     case "IN_TRADE":
       return "In trade";
     case "REVERSE_TRADE":
       return "Reverse trade";
     case "DONE":
       return "Done for today";
-    case "NO_TRADE":
-      return "No trade";
     default:
       return phase || "—";
   }
-}
-
-function PriceBox({ quote, active }: { quote: MarketQuote | undefined; active?: boolean }) {
-  if (!quote) {
-    return (
-      <PremiumCard className="!p-4">
-        <CardTitle title="—" compact />
-        <p className="text-2xl font-semibold text-[var(--text-primary)]">—</p>
-      </PremiumCard>
-    );
-  }
-  const label = quote.label;
-  const isLive = quote.market_open && quote.source === "live";
-  const tag =
-    quote.price_type === "CLOSE"
-      ? "Prev close"
-      : isLive
-        ? "LTP · Live"
-        : quote.price > 0
-          ? "LTP · Last"
-          : "Last price";
-  return (
-    <PremiumCard
-      className={cn(
-        "!p-4",
-        active && "ring-2 ring-[var(--accent)] ring-offset-2 ring-offset-[var(--bg)]",
-      )}
-    >
-      <div className="flex items-center justify-between gap-2">
-        <CardTitle title={label} compact />
-        <div className="flex items-center gap-1.5">
-          {active ? (
-            <span className="rounded-full bg-[var(--accent)] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-white">
-              Trading
-            </span>
-          ) : null}
-          <span
-            className={cn(
-              "rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide",
-              isLive ? "bg-[var(--success-soft)] text-[var(--success)]" : "bg-[var(--warning-soft)] text-[var(--warning)]",
-            )}
-          >
-            {tag}
-          </span>
-        </div>
-      </div>
-      <p className="mt-2 text-3xl font-semibold tabular-nums text-[var(--text-primary)]">{fmtPx(quote.price)}</p>
-      {quote.tradingsymbol ? (
-        <p className="mt-1 text-[11px] text-[var(--text-muted)]">{quote.tradingsymbol}</p>
-      ) : null}
-      {quote.error && quote.price <= 0 ? (
-        <p className="mt-1 text-[11px] text-[var(--danger)]">{quote.error}</p>
-      ) : null}
-    </PremiumCard>
-  );
-}
-
-function Metric({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <div>
-      <dt className="text-[10px] uppercase tracking-wide text-[var(--text-muted)]">{label}</dt>
-      <dd className="mt-0.5 text-sm font-medium text-[var(--text-primary)]">{children}</dd>
-    </div>
-  );
-}
-
-function BreakdownPanel({ data }: { data: DashboardSnapshot | null | undefined }) {
-  const market = data?.market || String(data?.config?.market || "") || "—";
-  const symbol = data?.active_symbol || "—";
-  const phase = data?.phase || "";
-  const cmp = data?.current_market_price ?? 0;
-  const priceType = data?.price_type === "CLOSE" ? "Prev close" : data?.price_type || "LTP";
-  const ref = data?.reference_price ?? 0;
-  const buy = data?.buy_trigger ?? 0;
-  const sell = data?.sell_trigger ?? 0;
-  const tpPts = data?.take_profit_pts ?? 0;
-  const slPts = data?.stop_loss_pts ?? 0;
-  const lots = data?.lots ?? 0;
-  const dist = data?.breakout_distance ?? 0;
-
-  const pendingTrade = useMemo(() => {
-    if ((phase || "").toUpperCase() !== "WAIT_BREAKOUT" || ref <= 0) return null;
-    return {
-      buyLine: `If LTP/close >= ${fmtPx(buy)} -> BUY ${lots} lot @ fill · TP ${fmtPx(buy + tpPts)} · SL ${fmtPx(buy - slPts)}`,
-      sellLine: `If LTP/close <= ${fmtPx(sell)} -> SELL ${lots} lot @ fill · TP ${fmtPx(sell - tpPts)} · SL ${fmtPx(sell + slPts)}`,
-    };
-  }, [phase, ref, buy, sell, lots, tpPts, slPts]);
-
-  const blockers: string[] = [];
-  if (data && !data.algo_running) blockers.push("Algo is stopped — enable algo to trade.");
-  if (data && data.in_session === false) blockers.push("Outside session window — engine ignores price ticks.");
-  if ((phase || "").toUpperCase() === "WAIT_REF") blockers.push("Waiting for start-time candle close as reference.");
-  if ((phase || "").toUpperCase() === "WAIT_BREAKOUT" && cmp > 0 && buy > 0 && sell > 0 && cmp < buy && cmp > sell) {
-    blockers.push("Price is between buy & sell triggers — no breakout yet.");
-  }
-  if (data?.last_live_error) blockers.push(data.last_live_error);
-
-  return (
-    <PremiumCard className="!p-4">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <CardTitle title="Strategy Breakdown" subtitle="Live state — what is armed and what trade will form" />
-        </div>
-        <span
-          className={cn(
-            "rounded-full px-3 py-1 text-[11px] font-semibold",
-            data?.algo_running
-              ? "bg-[var(--success-soft)] text-[var(--success)]"
-              : "bg-[var(--surface-muted)] text-[var(--text-muted)]",
-          )}
-        >
-          {phaseLabel(phase)}
-        </span>
-      </div>
-
-      <dl className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        <Metric label="Active market">
-          {market.replace(/_/g, " ")}
-        </Metric>
-        <Metric label="Symbol trading">{symbol}</Metric>
-        <Metric label="Session">
-          {data?.session_start || "—"} – {data?.session_end || "—"}
-          {data?.in_session != null ? (
-            <span className={cn("ml-2 text-[11px]", data.in_session ? "text-[var(--success)]" : "text-[var(--warning)]")}>
-              {data.in_session ? "· In session" : "· Outside session"}
-            </span>
-          ) : null}
-        </Metric>
-        <Metric label="Lots / Distance">
-          {lots || "—"} lot · breakout ±{dist || "—"}
-        </Metric>
-      </dl>
-
-      <div className="mt-4 grid gap-3 lg:grid-cols-3">
-        <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-muted)] p-3">
-          <p className="text-[10px] uppercase tracking-wide text-[var(--text-muted)]">Current price ({priceType})</p>
-          <p className="mt-1 text-2xl font-semibold tabular-nums text-[var(--text-primary)]">{fmtPx(cmp)}</p>
-          <p className="mt-1 text-[11px] text-[var(--text-muted)]">
-            This close/LTP is used for breakout checks on <span className="font-medium text-[var(--text-secondary)]">{symbol}</span>
-          </p>
-        </div>
-        <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-muted)] p-3">
-          <p className="text-[10px] uppercase tracking-wide text-[var(--text-muted)]">Reference close</p>
-          <p className="mt-1 text-2xl font-semibold tabular-nums text-[var(--text-primary)]">{fmtPx(ref)}</p>
-          <p className="mt-1 text-[11px] text-[var(--text-muted)]">
-            Start candle {data?.ref_candle_time || data?.session_start || "—"} · Buy {fmtPx(buy)} · Sell {fmtPx(sell)}
-          </p>
-        </div>
-        <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-muted)] p-3">
-          <p className="text-[10px] uppercase tracking-wide text-[var(--text-muted)]">Distance to triggers</p>
-          <p className="mt-1 text-sm tabular-nums text-[var(--text-primary)]">
-            BUY {fmtDelta(buy > 0 && cmp > 0 ? buy - cmp : NaN)} · SELL {fmtDelta(sell > 0 && cmp > 0 ? cmp - sell : NaN)}
-          </p>
-          <p className="mt-1 text-[11px] text-[var(--text-muted)]">
-            TP ±{tpPts || "—"} · SL ±{slPts || "—"}
-            {data?.active_side ? ` · Side ${data.active_side}${data.is_reverse ? " (reverse)" : ""}` : ""}
-          </p>
-        </div>
-      </div>
-
-      <div className="mt-4 rounded-xl border border-[var(--border-subtle)] p-3">
-        <p className="text-[10px] uppercase tracking-wide text-[var(--text-muted)]">Next / pending trade</p>
-        <p className="mt-1 text-sm leading-relaxed text-[var(--text-secondary)]">
-          {data?.next_action_level || data?.status_message || "—"}
-        </p>
-        {pendingTrade ? (
-          <ul className="mt-2 space-y-1 text-xs text-[var(--text-primary)]">
-            <li>• {pendingTrade.buyLine}</li>
-            <li>• {pendingTrade.sellLine}</li>
-          </ul>
-        ) : null}
-        {(phase || "").toUpperCase() === "IN_TRADE" || (phase || "").toUpperCase() === "REVERSE_TRADE" ? (
-          <p className="mt-2 text-xs tabular-nums text-[var(--text-primary)]">
-            Open {data?.is_reverse ? "Reverse" : "Initial"} {data?.active_side || "—"} · Entry {fmtPx(data?.entry_price ?? 0)} ·
-            TP {fmtPx(data?.tp_price ?? 0)} · SL {fmtPx(data?.sl_price ?? 0)}
-          </p>
-        ) : null}
-      </div>
-
-      {blockers.length > 0 ? (
-        <div className="mt-3 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-900 dark:text-amber-100">
-          <p className="font-semibold">Why trade may not fire</p>
-          <ul className="mt-1 list-disc space-y-0.5 pl-4">
-            {blockers.map((b) => (
-              <li key={b}>{b}</li>
-            ))}
-          </ul>
-        </div>
-      ) : null}
-    </PremiumCard>
-  );
 }
 
 function DataTable({
@@ -283,7 +121,7 @@ function DataTable({
           <thead>
             <tr className="border-b border-[var(--border-subtle)] bg-[var(--surface-muted)]">
               {headers.map((h) => (
-                <th key={h} className="px-3 py-2 font-medium text-[var(--text-secondary)]">
+                <th key={h} className="whitespace-nowrap px-3 py-2 font-medium text-[var(--text-secondary)]">
                   {h}
                 </th>
               ))}
@@ -300,7 +138,7 @@ function DataTable({
               rows.map((row, i) => (
                 <tr key={i} className="border-b border-[var(--border-subtle)] last:border-0">
                   {row.map((cell, j) => (
-                    <td key={j} className="max-w-[28rem] px-3 py-2 whitespace-pre-wrap break-words text-[var(--text-primary)]">
+                    <td key={j} className="max-w-[28rem] whitespace-pre-wrap break-words px-3 py-2 text-[var(--text-primary)]">
                       {cell}
                     </td>
                   ))}
@@ -310,6 +148,82 @@ function DataTable({
           </tbody>
         </table>
       </div>
+    </PremiumCard>
+  );
+}
+
+function StatusCard({
+  data,
+  quote,
+}: {
+  data: DashboardSnapshot | null | undefined;
+  quote: MarketQuote | undefined;
+}) {
+  const phase = data?.phase || "";
+  const cmp = data?.current_market_price ?? quote?.price ?? 0;
+  const isLive = Boolean(quote?.market_open && quote?.source === "live");
+
+  return (
+    <PremiumCard className="!p-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <CardTitle
+            title={(data?.market || "Market").replace(/_/g, " ")}
+            subtitle={data?.active_symbol || quote?.tradingsymbol || "—"}
+          />
+        </div>
+        <div className="flex items-center gap-2">
+          <span
+            className={cn(
+              "rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase",
+              isLive ? "bg-[var(--success-soft)] text-[var(--success)]" : "bg-[var(--warning-soft)] text-[var(--warning)]",
+            )}
+          >
+            {isLive ? "LTP · Live" : "LTP · Last"}
+          </span>
+          <span className="rounded-full bg-[var(--surface-muted)] px-3 py-1 text-[11px] font-semibold">
+            {phaseLabel(phase)}
+          </span>
+        </div>
+      </div>
+
+      <p className="mt-3 text-4xl font-semibold tabular-nums text-[var(--text-primary)]">{fmtPx(cmp)}</p>
+
+      <dl className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <div>
+          <dt className="text-[10px] uppercase text-[var(--text-muted)]">Session</dt>
+          <dd className="text-sm font-medium">
+            {data?.session_start || "—"} – {data?.session_end || "—"}
+          </dd>
+        </div>
+        <div>
+          <dt className="text-[10px] uppercase text-[var(--text-muted)]">Ref / Buy / Sell</dt>
+          <dd className="text-sm font-medium tabular-nums">
+            {fmtPx(data?.reference_price)} / {fmtPx(data?.buy_trigger)} / {fmtPx(data?.sell_trigger)}
+          </dd>
+        </div>
+        <div>
+          <dt className="text-[10px] uppercase text-[var(--text-muted)]">Lots · Dist · TP/SL</dt>
+          <dd className="text-sm font-medium tabular-nums">
+            {data?.lots ?? "—"} · ±{data?.breakout_distance ?? "—"} · {data?.take_profit_pts ?? "—"}/{data?.stop_loss_pts ?? "—"}
+          </dd>
+        </div>
+        <div>
+          <dt className="text-[10px] uppercase text-[var(--text-muted)]">P&amp;L · Trades</dt>
+          <dd className="text-sm font-medium tabular-nums">
+            {fmtPnl(data?.realized_pnl)} · {data?.trade_count ?? 0}
+          </dd>
+        </div>
+      </dl>
+
+      {(phase || "").toUpperCase() === "IN_TRADE" || (phase || "").toUpperCase() === "REVERSE_TRADE" ? (
+        <p className="mt-3 text-sm tabular-nums text-[var(--text-secondary)]">
+          Open {data?.is_reverse ? "Reverse" : "Initial"} {data?.active_side || "—"} · Entry {fmtPx(data?.entry_price)} · TP{" "}
+          {fmtPx(data?.tp_price)} · SL {fmtPx(data?.sl_price)}
+        </p>
+      ) : (
+        <p className="mt-3 text-sm text-[var(--text-secondary)]">{data?.status_message || data?.next_action_level || "—"}</p>
+      )}
     </PremiumCard>
   );
 }
@@ -327,6 +241,25 @@ export function Strategy4DashboardView() {
   const logs = serverOnline ? (data?.logs ?? []) : [];
   const showAngelTokenRefresh = serverOnline && detectMcxQuotesTokenExpiry(quotes);
   const selectedMarket = (data?.market || String(data?.config?.market || "")).toUpperCase();
+  const activeQuote = useMemo(
+    () => quotes.find((q) => q.key.toUpperCase() === selectedMarket) ?? quotes[0],
+    [quotes, selectedMarket],
+  );
+
+  const dayPnlById = useMemo(() => {
+    const sorted = [...completedTrades].sort((a, b) => {
+      const ta = new Date(a.exit_time || a.entry_time || 0).getTime();
+      const tb = new Date(b.exit_time || b.entry_time || 0).getTime();
+      return ta - tb;
+    });
+    const map = new Map<number, number>();
+    let running = 0;
+    for (const t of sorted) {
+      running += Number(t.pnl || 0);
+      map.set(t.id, running);
+    }
+    return map;
+  }, [completedTrades]);
 
   async function toggleAlgo(enable: boolean) {
     setBusy(true);
@@ -354,8 +287,8 @@ export function Strategy4DashboardView() {
   }
 
   return (
-    <div className="mx-auto max-w-6xl space-y-6 pb-10">
-      <PageHeader title="Dashboard" subtitle="Strategy 4 — MCX single breakout + reverse entry" />
+    <div className="mx-auto max-w-6xl space-y-5 pb-10">
+      <PageHeader title="Dashboard" subtitle="Strategy 4 — MCX breakout + reverse" />
 
       {error ? (
         <p className="rounded-xl border border-[var(--danger-soft)] bg-[var(--danger-soft)] px-4 py-3 text-sm text-[var(--danger)]">{error}</p>
@@ -363,17 +296,11 @@ export function Strategy4DashboardView() {
 
       {!serverOnline ? (
         <p className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-800 dark:text-amber-200">
-          Server offline — active trades, completed trades, and logs are hidden until the server is back.
+          Server offline — trades and logs are hidden until the server is back.
         </p>
       ) : null}
 
       <AngelTokenRefreshBanner show={showAngelTokenRefresh} />
-
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        {quotes.map((quote) => (
-          <PriceBox key={quote.key} quote={quote} active={quote.key.toUpperCase() === selectedMarket} />
-        ))}
-      </div>
 
       <PremiumCard className="!p-4">
         <div className="flex flex-wrap items-center gap-3">
@@ -397,144 +324,38 @@ export function Strategy4DashboardView() {
           </button>
           <div className="ml-auto flex items-center gap-2">
             <span className="text-xs text-[var(--text-muted)]">Mode</span>
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() => void changeMode("PAPER")}
-              className={cn(
-                "rounded-lg px-3 py-1.5 text-xs font-medium",
-                data?.trading_mode === "PAPER"
-                  ? "bg-[var(--accent)] text-white"
-                  : "border border-[var(--border-subtle)] text-[var(--text-secondary)]",
-              )}
-            >
-              Paper
-            </button>
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() => void changeMode("LIVE")}
-              className={cn(
-                "rounded-lg px-3 py-1.5 text-xs font-medium",
-                data?.trading_mode === "LIVE"
-                  ? "bg-[var(--accent)] text-white"
-                  : "border border-[var(--border-subtle)] text-[var(--text-secondary)]",
-              )}
-            >
-              Live
-            </button>
+            {(["PAPER", "LIVE"] as const).map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                disabled={busy}
+                onClick={() => void changeMode(mode)}
+                className={cn(
+                  "rounded-lg px-3 py-1.5 text-xs font-medium",
+                  data?.trading_mode === mode
+                    ? "bg-[var(--accent)] text-white"
+                    : "border border-[var(--border-subtle)] text-[var(--text-secondary)]",
+                )}
+              >
+                {mode === "PAPER" ? "Paper" : "Live"}
+              </button>
+            ))}
           </div>
         </div>
         <p className="mt-2 text-xs text-[var(--text-muted)]">
           Algo: {data?.algo_running ? "Running" : "Stopped"} · Mode: {data?.trading_mode ?? "PAPER"}
-          {selectedMarket ? ` · Market: ${selectedMarket.replace(/_/g, " ")}` : ""}
-          {data?.active_symbol ? ` · Symbol: ${data.active_symbol}` : ""}
         </p>
       </PremiumCard>
 
-      <BreakdownPanel data={data} />
-
-      <div className="grid gap-4 lg:grid-cols-2">
-        <PremiumCard className="!p-0 overflow-hidden">
-          <div className="border-b border-[var(--border-subtle)] px-4 py-3">
-            <CardTitle title={`Breakout Levels · Ref ${fmtPx(data?.reference_price ?? 0)}`} compact />
-            {data?.active_symbol ? (
-              <p className="mt-1 text-xs text-[var(--text-muted)]">
-                Symbol: <span className="font-medium text-[var(--text-secondary)]">{data.active_symbol}</span>
-                {data.active_side ? ` · ${data.is_reverse ? "Reverse " : ""}${data.active_side}` : " · Waiting breakout"}
-              </p>
-            ) : (
-              <p className="mt-1 text-xs text-[var(--text-muted)]">Select market in Strategy Settings</p>
-            )}
-          </div>
-          <div className="overflow-x-auto">
-            <table className="min-w-full text-left text-xs">
-              <thead>
-                <tr className="border-b border-[var(--border-subtle)] bg-[var(--surface-muted)]">
-                  <th className="px-3 py-2">Level</th>
-                  <th className="px-3 py-2">Price</th>
-                  <th className="px-3 py-2">Action</th>
-                  <th className="px-3 py-2">Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(data?.grid_levels ?? []).length === 0 ? (
-                  <tr>
-                    <td colSpan={4} className="px-3 py-6 text-center text-[var(--text-muted)]">
-                      Save strategy settings and enable algo to arm breakout levels
-                    </td>
-                  </tr>
-                ) : (
-                  data?.grid_levels.map((row) => (
-                    <tr key={row.level} className="border-b border-[var(--border-subtle)] last:border-0">
-                      <td className="px-3 py-2 font-medium">{row.level}</td>
-                      <td className="px-3 py-2 tabular-nums">{fmtPx(row.price)}</td>
-                      <td className="px-3 py-2">{row.action}</td>
-                      <td className="px-3 py-2">{row.status}</td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
-        </PremiumCard>
-
-        <PremiumCard className="!p-4">
-          <CardTitle title="Live Position" />
-          <dl className="mt-3 grid gap-3 sm:grid-cols-2">
-            <div>
-              <dt className="text-[10px] text-[var(--text-muted)]">Current Position Lots</dt>
-              <dd className="text-lg font-semibold tabular-nums">{data?.position_lots ?? 0}</dd>
-            </div>
-            <div>
-              <dt className="text-[10px] text-[var(--text-muted)]">Realized P&amp;L</dt>
-              <dd className="text-lg font-semibold tabular-nums">{fmtPnl(data?.realized_pnl ?? 0)}</dd>
-            </div>
-            <div>
-              <dt className="text-[10px] text-[var(--text-muted)]">Unrealized P&amp;L</dt>
-              <dd className="text-lg font-semibold tabular-nums">{fmtPnl(data?.unrealized_pnl ?? 0)}</dd>
-            </div>
-            <div>
-              <dt className="text-[10px] text-[var(--text-muted)]">Current Market Price</dt>
-              <dd className="text-lg font-semibold tabular-nums">{fmtPx(data?.current_market_price ?? 0)}</dd>
-            </div>
-            <div>
-              <dt className="text-[10px] text-[var(--text-muted)]">Phase</dt>
-              <dd className="text-sm font-medium">{phaseLabel(data?.phase)}</dd>
-            </div>
-            <div>
-              <dt className="text-[10px] text-[var(--text-muted)]">Trades Today</dt>
-              <dd className="text-lg font-semibold tabular-nums">{data?.trade_count ?? 0}</dd>
-            </div>
-            <div>
-              <dt className="text-[10px] text-[var(--text-muted)]">Buy Trigger</dt>
-              <dd className="text-lg font-semibold tabular-nums">{fmtPx(data?.buy_trigger ?? 0)}</dd>
-            </div>
-            <div>
-              <dt className="text-[10px] text-[var(--text-muted)]">Sell Trigger</dt>
-              <dd className="text-lg font-semibold tabular-nums">{fmtPx(data?.sell_trigger ?? 0)}</dd>
-            </div>
-            <div>
-              <dt className="text-[10px] text-[var(--text-muted)]">Entry / TP / SL</dt>
-              <dd className="text-sm font-medium tabular-nums">
-                {fmtPx(data?.entry_price ?? 0)} / {fmtPx(data?.tp_price ?? 0)} / {fmtPx(data?.sl_price ?? 0)}
-              </dd>
-            </div>
-            <div className="sm:col-span-2">
-              <dt className="text-[10px] text-[var(--text-muted)]">Status</dt>
-              <dd className="text-sm text-[var(--text-secondary)]">{data?.status_message || data?.next_action_level || "—"}</dd>
-            </div>
-          </dl>
-        </PremiumCard>
-      </div>
+      <StatusCard data={data} quote={activeQuote} />
 
       <DataTable
         title="Active Trades"
-        headers={["Trade Time", "Side", "Leg", "Lots", "Entry", "Mark", "P&L", "Mode"]}
+        headers={["Time", "Side", "Leg", "Lots", "Entry", "Mark", "P&L", "Mode"]}
         rows={activeTrades.map((t) => [
           fmtDateTime(t.entry_time),
           t.side || "—",
-          t.leg_id,
+          tradeLabel(t.leg_id),
           t.lots,
           fmtPx(t.entry_price),
           fmtPx(t.current_price),
@@ -546,18 +367,39 @@ export function Strategy4DashboardView() {
 
       <DataTable
         title="Completed Trades"
-        headers={["Entry Time", "Exit Time", "Leg", "Symbol", "Entry", "Exit", "P&L", "Reason"]}
+        headers={[
+          "Date",
+          "Trade",
+          "Direction",
+          "Entry Time",
+          "Entry",
+          "TP",
+          "SL",
+          "Exit Time",
+          "Exit",
+          "Exit Reason",
+          "Duration",
+          "Lots",
+          "Trade P&L",
+          "Day P&L",
+        ]}
         rows={completedTrades.map((t) => [
-          fmtDateTime(t.entry_time),
-          fmtDateTime(t.exit_time),
-          t.leg_id,
-          t.symbol ?? "—",
-          fmtPx(t.entry_price ?? 0),
-          fmtPx(t.exit_price ?? 0),
-          fmtPnl(t.pnl ?? 0),
-          t.exit_reason ?? "—",
+          fmtDate(t.entry_time || t.exit_time),
+          tradeLabel(t.leg_id),
+          t.side || "—",
+          fmtTime(t.entry_time),
+          fmtPx(t.entry_price),
+          fmtPx(t.tp),
+          fmtPx(t.sl),
+          fmtTime(t.exit_time),
+          fmtPx(t.exit_price),
+          exitReasonLabel(t.exit_reason),
+          durationLabel(t.entry_time, t.exit_time),
+          t.lots ?? "—",
+          fmtPnl(t.pnl),
+          fmtPnl(dayPnlById.get(t.id)),
         ])}
-        empty={serverOnline ? "No completed trades" : "Server offline — trade history is hidden"}
+        empty={serverOnline ? "No completed trades" : "Server offline"}
         action={
           serverOnline ? (
             <button

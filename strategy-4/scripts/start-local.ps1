@@ -39,11 +39,14 @@ function Clear-ListenPort {
 function Start-ManagedProcess {
     param(
         [Parameter(Mandatory = $true)][string]$Name,
-        [Parameter(Mandatory = $true)][string]$Command
+        [Parameter(Mandatory = $true)][string]$Command,
+        [Parameter(Mandatory = $false)][string]$WindowTitle = ""
     )
+    $title = if ($WindowTitle) { $WindowTitle } else { "$StrategyName · $Name" }
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = "cmd.exe"
-    $psi.Arguments = "/d /s /c `"$Command`""
+    # Set console title so Backend/Frontend windows are easy to tell apart.
+    $psi.Arguments = "/d /s /c `"title $title & $Command`""
     $psi.WorkingDirectory = $root
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $false
@@ -149,7 +152,14 @@ function Open-StrategyInChrome {
 $children = @()
 
 try {
+    try {
+        $Host.UI.RawUI.WindowTitle = "$StrategyName · UI:$FrontendPort · API:$BackendPort"
+    } catch {
+        # ignore hosts without console title support
+    }
     Write-Host "$StrategyName - starting backend + frontend" -ForegroundColor Cyan
+    Write-Host "  UI  http://localhost:$FrontendPort" -ForegroundColor DarkGray
+    Write-Host "  API http://localhost:$BackendPort" -ForegroundColor DarkGray
     Write-Host "Frontend: $FrontendUrl"
     Write-Host "Backend : http://127.0.0.1:$BackendPort"
     Write-Host "Login   : admin / admin"
@@ -161,7 +171,7 @@ try {
     Close-ChromeTabsForUrl -Url $FrontendUrl
     Start-Sleep -Seconds 2
 
-    $children += Start-ManagedProcess -Name "Backend" -Command "npm run worker"
+    $children += Start-ManagedProcess -Name "Backend" -Command "npm run worker" -WindowTitle "$StrategyName · Backend · :$BackendPort"
     Start-Sleep -Seconds 3
 
     $buildId = Join-Path $root ".next\BUILD_ID"
@@ -183,7 +193,7 @@ try {
         Write-Host "Using existing production build (.next is up to date)." -ForegroundColor DarkGray
     }
 
-    $children += Start-ManagedProcess -Name "Frontend" -Command "npm run start"
+    $children += Start-ManagedProcess -Name "Frontend" -Command "npm run start" -WindowTitle "$StrategyName · Frontend · :$FrontendPort"
     Start-Sleep -Seconds 4
 
     Open-StrategyInChrome -Url $FrontendUrl

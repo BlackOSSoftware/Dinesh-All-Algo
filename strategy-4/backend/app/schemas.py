@@ -86,6 +86,8 @@ class CompletedPositionOut(BaseModel):
     range_level: float | None = None
     strike: float | None = None
     tp: float | None = None
+    sl: float | None = None
+    lots: int | None = None
     symbol: str | None = None
     entry_price: float | None = None
     exit_price: float | None = None

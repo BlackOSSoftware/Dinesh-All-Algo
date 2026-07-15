@@ -212,6 +212,10 @@ export type CompletedTrade = {
   entry_time?: string | null;
   exit_time?: string | null;
   leg_id: string;
+  side?: string | null;
+  tp?: number | null;
+  sl?: number | null;
+  lots?: number | null;
   symbol?: string | null;
   entry_price?: number | null;
   exit_price?: number | null;
