@@ -46,6 +46,8 @@ const COMPLETED_COLS = [
   "Exit Reason",
 ] as const;
 
+const LOG_COLS = ["Time", "Mode", "Action", "Leg", "Symbol", "Qty", "P&L", "Status", "Message"] as const;
+
 function fmtExitReason(reason: string | null | undefined): string {
   if (!reason) return "—";
   const map: Record<string, string> = {
@@ -93,6 +95,7 @@ export function DashboardView() {
   const d = t.d;
   const { engineOn, engineCheckPending } = useEngineStatus();
   const [clearModal, setClearModal] = useState(false);
+  const [clearLogsModal, setClearLogsModal] = useState(false);
 
   const livePx = t.liveIndex;
   const basePrice = t.basePrice;
@@ -110,6 +113,7 @@ export function DashboardView() {
           : "Flat";
 
   const completedRows = serverOnline ? d.completedTrades : [];
+  const logRows = serverOnline ? d.tradingLogs : [];
 
   return (
     <div className="mx-auto max-w-[1400px] space-y-4 pb-8">
@@ -446,6 +450,84 @@ export function DashboardView() {
         </div>
       </PremiumCard>
 
+      <PremiumCard compact className="overflow-hidden">
+        <CardTitle
+          title="Logs"
+          compact
+          subtitle={serverOnline ? `${logRows.length} entr${logRows.length === 1 ? "y" : "ies"}` : "Server offline"}
+          action={
+            serverOnline ? (
+              <button
+                type="button"
+                onClick={() => setClearLogsModal(true)}
+                disabled={d.tradingLogs.length === 0 || d.clearingLogs}
+                className="rounded border border-rose-500/30 px-2.5 py-1 text-[10px] font-medium text-rose-600 hover:bg-rose-500/10 disabled:opacity-40"
+              >
+                Clear logs
+              </button>
+            ) : null
+          }
+        />
+        <div className="overflow-x-auto rounded-lg border border-[var(--border-subtle)]">
+          <table className="w-full min-w-[900px] border-collapse text-xs">
+            <thead>
+              <tr className="border-b border-[var(--border-subtle)] bg-[var(--surface-muted)]">
+                {LOG_COLS.map((h) => (
+                  <th
+                    key={h}
+                    className="whitespace-nowrap px-3 py-2.5 text-left text-[10px] font-semibold uppercase tracking-wider text-[var(--text-muted)]"
+                  >
+                    {h}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {!serverOnline ? (
+                <tr>
+                  <td colSpan={LOG_COLS.length} className="px-3 py-8 text-center text-sm text-[var(--text-muted)]">
+                    Server offline — logs are hidden.
+                  </td>
+                </tr>
+              ) : logRows.length === 0 ? (
+                <tr>
+                  <td colSpan={LOG_COLS.length} className="px-3 py-8 text-center text-sm text-[var(--text-muted)]">
+                    No logs yet.
+                  </td>
+                </tr>
+              ) : (
+                logRows.map((l) => (
+                  <tr key={l.id} className="border-b border-[var(--border-subtle)]/60 last:border-0 hover:bg-[var(--surface-muted)]/40">
+                    <td className="whitespace-nowrap px-3 py-2 font-mono text-[11px]">
+                      {d.formatTradeTimeIST(l.created_at)}
+                    </td>
+                    <td className="px-3 py-2 text-[11px] uppercase text-[var(--text-muted)]">{l.mode || "—"}</td>
+                    <td className="px-3 py-2 font-mono text-[11px] font-semibold">{l.action || "—"}</td>
+                    <td className="px-3 py-2 font-mono text-[11px]">{l.leg || "—"}</td>
+                    <td className="max-w-[120px] truncate px-3 py-2 font-mono text-[11px]" title={l.symbol ?? ""}>
+                      {l.symbol ?? "—"}
+                    </td>
+                    <td className="px-3 py-2 font-mono tabular-nums">{l.quantity ?? "—"}</td>
+                    <td
+                      className={cn(
+                        "px-3 py-2 font-mono font-semibold tabular-nums",
+                        (l.pnl ?? 0) >= 0 ? "text-emerald-600" : "text-rose-600",
+                      )}
+                    >
+                      {l.pnl != null ? d.fmtInr(l.pnl) : "—"}
+                    </td>
+                    <td className="px-3 py-2 text-[11px]">{l.status ?? "—"}</td>
+                    <td className="max-w-[280px] truncate px-3 py-2 text-[11px] text-[var(--text-secondary)]" title={l.message ?? ""}>
+                      {l.message ?? "—"}
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </PremiumCard>
+
       <ConfirmModal
         open={clearModal}
         title="Clear completed trades?"
@@ -456,6 +538,19 @@ export function DashboardView() {
         onConfirm={() => {
           setClearModal(false);
           void d.clearCompletedTrades();
+        }}
+      />
+
+      <ConfirmModal
+        open={clearLogsModal}
+        title="Clear all logs?"
+        message="This removes all trading log messages from your account. Open trades are not affected."
+        confirmLabel="Clear logs"
+        danger
+        onCancel={() => setClearLogsModal(false)}
+        onConfirm={() => {
+          setClearLogsModal(false);
+          void d.clearTradingLogs();
         }}
       />
 

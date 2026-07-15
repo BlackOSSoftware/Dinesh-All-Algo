@@ -138,6 +138,48 @@ def _detect_public_ip() -> str:
     return ""
 
 
+def _check_clock_skew() -> tuple[bool, str]:
+    """
+    Compare OS UTC with an HTTP Date header. Wrong VPS clock → AB1050 even with correct secret.
+    Returns (ok_to_continue, message).
+    """
+    from email.utils import parsedate_to_datetime
+
+    ref_urls = (
+        "https://apiconnect.angelone.in",
+        "https://www.google.com",
+        "https://api.ipify.org",
+    )
+    for url in ref_urls:
+        try:
+            req = urllib.request.Request(url, method="HEAD")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                date_hdr = resp.headers.get("Date") or resp.headers.get("date")
+            if not date_hdr:
+                continue
+            ref = parsedate_to_datetime(date_hdr)
+            if ref.tzinfo is None:
+                ref = ref.replace(tzinfo=timezone.utc)
+            else:
+                ref = ref.astimezone(timezone.utc)
+            local = datetime.now(timezone.utc)
+            skew_sec = abs((local - ref).total_seconds())
+            msg = (
+                f"clock_check: local_utc={local.strftime('%Y-%m-%d %H:%M:%S')} "
+                f"network_utc={ref.strftime('%Y-%m-%d %H:%M:%S')} skew={int(skew_sec)}s"
+            )
+            if skew_sec > 45:
+                return False, (
+                    f"{msg}. VPS clock is WRONG — TOTP will always fail (AB1050). "
+                    "Windows: tzutil /s \"India Standard Time\" then w32tm /resync "
+                    "(or Settings → Time → Sync now). Then re-run this script."
+                )
+            return True, msg
+        except Exception:  # noqa: BLE001
+            continue
+    return True, "clock_check: skipped (could not reach network time reference)"
+
+
 def _resolve_network_headers() -> tuple[str, str, str]:
     """
     smartapi-python sets class attrs then overwrites public IP to 106.193.147.98 in a
@@ -223,6 +265,12 @@ def main() -> int:
         return 1
 
     local_ip, public_ip, mac = _resolve_network_headers()
+    clock_ok, clock_msg = _check_clock_skew()
+    print(clock_msg, file=sys.stderr)
+    if not clock_ok:
+        print(clock_msg, file=sys.stderr)
+        return 1
+
     utc_now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     print(
         f"Login as {client_id} | server_time={utc_now} | public_ip={public_ip} | totp={totp_code}",
