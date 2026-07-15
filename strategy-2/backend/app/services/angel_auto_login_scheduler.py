@@ -115,12 +115,34 @@ def login_python_command(root: Path | None = None) -> list[str]:
 
 
 def _mask_jwt_in_log(text: str) -> str:
-    return re.sub(
+    text = re.sub(
         r"(ANGEL_JWT_TOKEN=)([^\s\r\n#]+)",
         r"\1***redacted***",
         text,
         flags=re.IGNORECASE,
     )
+    # SmartConnect dumps full request/headers on failure — scrub before UI/logs.
+    text = re.sub(r"(['\"]password['\"]\s*:\s*['\"])[^'\"]+", r"\1***", text, flags=re.IGNORECASE)
+    text = re.sub(r"(['\"]totp['\"]\s*:\s*['\"])[^'\"]+", r"\1***", text, flags=re.IGNORECASE)
+    text = re.sub(r"(X-PrivateKey['\"]\s*:\s*['\"])[^'\"]+", r"\1***", text, flags=re.IGNORECASE)
+    text = re.sub(r"(['\"]clientcode['\"]\s*:\s*['\"])[^'\"]+", r"\1***", text, flags=re.IGNORECASE)
+    return text
+
+
+def _humanize_angel_login_error(detail: str) -> str:
+    low = (detail or "").lower()
+    if "ab1050" in low or "invalid totp" in low:
+        return (
+            "AB1050 Invalid TOTP/client. "
+            "In this strategy's backend/.env, ANGEL_CLIENT_ID + ANGEL_PIN + ANGEL_TOTP_SECRET + ANGEL_API_KEY "
+            "must all belong to the SAME Angel account. "
+            "TOTP secret must be from https://smartapi.angelone.in/enable-totp (QR secret for that client), "
+            "not another account and not the API key. "
+            "Also sync VPS clock with NTP (timedatectl / chrony)."
+        )
+    if "ag8001" in low or "invalid token" in low:
+        return "Angel JWT invalid — generate a fresh session after fixing credentials."
+    return detail
 
 
 def _clear_quote_caches() -> None:
@@ -167,6 +189,9 @@ def _format_script_failure(rc: int, stdout: str, stderr: str) -> str:
         lines.append(s)
     detail = " | ".join(lines[-8:]) if lines else ""
     detail = _mask_jwt_in_log(detail).strip()
+    hint = _humanize_angel_login_error(detail)
+    if hint and hint != detail:
+        return f"script exit {rc}: {hint}"
     if detail:
         return f"script exit {rc}: {detail}"
     return (

@@ -26,6 +26,7 @@ import binascii
 import os
 import re
 import sys
+import time
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -104,6 +105,52 @@ def _write_tokens_to_env_files(jwt_token: str, refresh_token: str, feed_token: s
     return [path]
 
 
+def _login_ok(result: object) -> bool:
+    if not isinstance(result, dict):
+        return False
+    data = result.get("data")
+    if result.get("status") is True:
+        return True
+    return isinstance(data, dict) and bool(data.get("jwtToken") or data.get("jwt_token"))
+
+
+def _is_totp_error(result: object) -> bool:
+    if not isinstance(result, dict):
+        return False
+    msg = str(result.get("message") or "").lower()
+    code = str(result.get("errorcode") or result.get("errorCode") or "").upper()
+    return code == "AB1050" or "invalid totp" in msg
+
+
+def _try_generate_session(api, client_id: str, pin: str, totp_secret: str):
+    """
+    Try current TOTP and nearby 30s windows — VPS clocks are often a few seconds off.
+    Returns (result, totp_used).
+    """
+    import pyotp
+
+    totp_obj = pyotp.TOTP(totp_secret)
+    now = int(time.time())
+    # Current step, then ±1 and ±2 periods (30s each).
+    offsets = (0, -30, 30, -60, 60)
+    last = None
+    used = ""
+    for off in offsets:
+        code = totp_obj.at(now + off)
+        used = code
+        result = api.generateSession(client_id, pin, code)
+        last = result
+        if _login_ok(result):
+            if off != 0:
+                print(f"Login OK with TOTP time offset {off}s (sync VPS clock with NTP).", file=sys.stderr)
+            return result, used
+        # Wrong TOTP → try next window. Other errors → stop.
+        if not _is_totp_error(result):
+            return result, used
+        time.sleep(0.35)
+    return last, used
+
+
 def main() -> int:
     try:
         from dotenv import load_dotenv
@@ -152,7 +199,8 @@ def main() -> int:
         return 1
 
     try:
-        totp = pyotp.TOTP(totp_secret).now()
+        # Probe that secret decodes; discard value (login retries windows below).
+        _ = pyotp.TOTP(totp_secret).now()
     except binascii.Error as e:
         print(
             "TOTP decode failed after normalization (Base32). "
@@ -162,14 +210,26 @@ def main() -> int:
         )
         print(repr(e), file=sys.stderr)
         return 1
+
     api = SmartConnect(api_key)
-    result = api.generateSession(client_id, pin, totp)
+    result, _totp_used = _try_generate_session(api, client_id, pin, totp_secret)
 
     if not isinstance(result, dict):
         print("Unexpected response:", result, file=sys.stderr)
         return 1
 
-    if result.get("status") is not True and not result.get("data"):
+    if not _login_ok(result):
+        if _is_totp_error(result):
+            print(
+                f"AB1050 for client {client_id}: Invalid TOTP/client combination. "
+                "Fix backend/.env so ANGEL_CLIENT_ID, ANGEL_PIN, ANGEL_TOTP_SECRET, and ANGEL_API_KEY "
+                "all belong to the SAME Angel account. "
+                "Get ANGEL_TOTP_SECRET from https://smartapi.angelone.in/enable-totp "
+                "(secret under the QR for this client) — do not reuse another account's secret. "
+                "Compare pyotp code with Google Authenticator for the same account; "
+                "if they differ, the secret is wrong. Sync VPS time (NTP).",
+                file=sys.stderr,
+            )
         print("Login failed:", result, file=sys.stderr)
         return 1
 
