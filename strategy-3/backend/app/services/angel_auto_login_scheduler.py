@@ -131,14 +131,17 @@ def _mask_jwt_in_log(text: str) -> str:
 
 def _humanize_angel_login_error(detail: str) -> str:
     low = (detail or "").lower()
+    if "exceeding access rate" in low or "access denied because of exceeding" in low:
+        return (
+            "Angel rate limit — wait 15–30 minutes, then click Generate Token once. "
+            "Or login on laptop and copy ANGEL_JWT_TOKEN + ANGEL_REFRESH_TOKEN into VPS backend/.env."
+        )
     if "ab1050" in low or "invalid totp" in low:
         return (
             "AB1050 Invalid TOTP/client. "
-            "In this strategy's backend/.env, ANGEL_CLIENT_ID + ANGEL_PIN + ANGEL_TOTP_SECRET + ANGEL_API_KEY "
-            "must all belong to the SAME Angel account. "
-            "TOTP secret must be from https://smartapi.angelone.in/enable-totp (QR secret for that client), "
-            "not another account and not the API key. "
-            "Also sync VPS clock with NTP (timedatectl / chrony)."
+            "Compare script totp= with Authenticator for that client; sync VPS clock (NTP); "
+            "set ANGEL_CLIENT_PUBLIC_IP to VPS real public IP (smartapi-python hardcodes 106.193.147.98). "
+            "Confirm VPS .env TOTP matches the laptop .env exactly."
         )
     if "ag8001" in low or "invalid token" in low:
         return "Angel JWT invalid — generate a fresh session after fixing credentials."

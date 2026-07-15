@@ -7,6 +7,8 @@ Uses env (see backend/.env.example):
   ANGEL_CLIENT_ID     — Angel client id (login id)
   ANGEL_PIN           — 4-digit MPIN
   ANGEL_TOTP_SECRET   — TOTP secret: Base32 (A–Z, 2–7), or hex (≥16 chars), or full otpauth://… URL
+  ANGEL_CLIENT_PUBLIC_IP / ANGEL_CLIENT_LOCAL_IP / ANGEL_MAC_ADDRESS — optional overrides
+    (smartapi-python hardcodes 106.193.147.98 in a finally block; we override after init)
 
 Run (PowerShell):
 
@@ -27,6 +29,8 @@ import os
 import re
 import sys
 import time
+import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -122,33 +126,40 @@ def _is_totp_error(result: object) -> bool:
     return code == "AB1050" or "invalid totp" in msg
 
 
-def _try_generate_session(api, client_id: str, pin: str, totp_secret: str):
-    """
-    Try current TOTP and nearby 30s windows — VPS clocks are often a few seconds off.
-    Returns (result, totp_used).
-    """
-    import pyotp
+def _detect_public_ip() -> str:
+    for url in ("https://api.ipify.org", "https://ifconfig.me/ip"):
+        try:
+            with urllib.request.urlopen(url, timeout=5) as resp:
+                ip = resp.read().decode("utf-8", errors="replace").strip()
+            if re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", ip):
+                return ip
+        except Exception:  # noqa: BLE001
+            continue
+    return ""
 
-    totp_obj = pyotp.TOTP(totp_secret)
-    now = int(time.time())
-    # Current step, then ±1 and ±2 periods (30s each).
-    offsets = (0, -30, 30, -60, 60)
-    last = None
-    used = ""
-    for off in offsets:
-        code = totp_obj.at(now + off)
-        used = code
-        result = api.generateSession(client_id, pin, code)
-        last = result
-        if _login_ok(result):
-            if off != 0:
-                print(f"Login OK with TOTP time offset {off}s (sync VPS clock with NTP).", file=sys.stderr)
-            return result, used
-        # Wrong TOTP → try next window. Other errors → stop.
-        if not _is_totp_error(result):
-            return result, used
-        time.sleep(0.35)
-    return last, used
+
+def _resolve_network_headers() -> tuple[str, str, str]:
+    """
+    smartapi-python sets class attrs then overwrites public IP to 106.193.147.98 in a
+    `finally` block — so generateSession always sent a wrong IP unless we override instance attrs.
+    """
+    local_ip = (os.getenv("ANGEL_CLIENT_LOCAL_IP") or "").strip() or "127.0.0.1"
+    public_ip = (os.getenv("ANGEL_CLIENT_PUBLIC_IP") or "").strip()
+    mac = (os.getenv("ANGEL_MAC_ADDRESS") or "").strip() or "00:00:00:00:00:00"
+    if not public_ip or public_ip in ("127.0.0.1", "0.0.0.0", "localhost", "106.193.147.98"):
+        detected = _detect_public_ip()
+        public_ip = detected or "127.0.0.1"
+    return local_ip, public_ip, mac
+
+
+def _apply_network_headers(api, local_ip: str, public_ip: str, mac: str) -> None:
+    # requestHeaders() reads camelCase *Ip* attributes (not *IP*).
+    api.clientLocalIp = local_ip
+    api.clientPublicIp = public_ip
+    api.clientMacAddress = mac
+    api.clientLocalIP = local_ip
+    api.clientPublicIP = public_ip
+    api.clientMacAddress = mac
 
 
 def main() -> int:
@@ -199,8 +210,8 @@ def main() -> int:
         return 1
 
     try:
-        # Probe that secret decodes; discard value (login retries windows below).
-        _ = pyotp.TOTP(totp_secret).now()
+        totp_obj = pyotp.TOTP(totp_secret)
+        totp_code = totp_obj.now()
     except binascii.Error as e:
         print(
             "TOTP decode failed after normalization (Base32). "
@@ -211,8 +222,35 @@ def main() -> int:
         print(repr(e), file=sys.stderr)
         return 1
 
+    local_ip, public_ip, mac = _resolve_network_headers()
+    utc_now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    print(
+        f"Login as {client_id} | server_time={utc_now} | public_ip={public_ip} | totp={totp_code}",
+        file=sys.stderr,
+    )
+    print(
+        "Compare totp= above with Google Authenticator for THIS client. "
+        "If different, ANGEL_TOTP_SECRET is wrong or VPS clock is wrong (sync NTP).",
+        file=sys.stderr,
+    )
+
     api = SmartConnect(api_key)
-    result, _totp_used = _try_generate_session(api, client_id, pin, totp_secret)
+    _apply_network_headers(api, local_ip, public_ip, mac)
+
+    try:
+        # One attempt only — repeated AB1050 retries trip Angel rate limit.
+        result = api.generateSession(client_id, pin, totp_code)
+    except Exception as e:  # noqa: BLE001
+        msg = str(e)
+        if "exceeding access rate" in msg.lower() or "access denied" in msg.lower():
+            print(
+                "Angel rate-limited this IP after too many login attempts. "
+                "Wait 15–30 minutes, do NOT spam Generate Token, then try once. "
+                "Meanwhile: login on laptop, copy ANGEL_JWT_TOKEN + ANGEL_REFRESH_TOKEN into VPS backend/.env, restart backend.",
+                file=sys.stderr,
+            )
+        print(f"Login request failed: {e}", file=sys.stderr)
+        return 1
 
     if not isinstance(result, dict):
         print("Unexpected response:", result, file=sys.stderr)
@@ -222,12 +260,11 @@ def main() -> int:
         if _is_totp_error(result):
             print(
                 f"AB1050 for client {client_id}: Invalid TOTP/client combination. "
-                "Fix backend/.env so ANGEL_CLIENT_ID, ANGEL_PIN, ANGEL_TOTP_SECRET, and ANGEL_API_KEY "
-                "all belong to the SAME Angel account. "
-                "Get ANGEL_TOTP_SECRET from https://smartapi.angelone.in/enable-totp "
-                "(secret under the QR for this client) — do not reuse another account's secret. "
-                "Compare pyotp code with Google Authenticator for the same account; "
-                "if they differ, the secret is wrong. Sync VPS time (NTP).",
+                "Same .env working on laptop usually means: (1) VPS clock wrong — sync NTP, "
+                "(2) VPS .env TOTP differs from laptop (open both files), "
+                "(3) set ANGEL_CLIENT_PUBLIC_IP to this machine's real public IP in .env. "
+                f"Logged with public_ip={public_ip}. "
+                "After rate-limit errors, wait 15–30 min before retrying.",
                 file=sys.stderr,
             )
         print("Login failed:", result, file=sys.stderr)
