@@ -256,6 +256,9 @@ def get_dashboard(user: User = Depends(get_current_user), db: Session = Depends(
     active_rows = tr.list_open_positions(db, user.id)
     active_trades: list[ActivePositionOut] = []
     for p in active_rows:
+        # LIVE Active Trades only after broker-confirmed fill (entry_price > 0).
+        if (p.trading_mode or "").upper() == "LIVE" and float(p.entry_price or 0) <= 0:
+            continue
         mark = current_price if current_price > 0 else float(p.entry_price or 0)
         entry = float(p.entry_price or 0.0)
         qty = int(p.quantity)

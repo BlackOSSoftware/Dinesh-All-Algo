@@ -153,10 +153,52 @@ def _execute_live_order(
             timeout_sec=float(settings.angel_request_timeout_sec or 15.0),
             **_angel_order_headers(),
         )
-        order_id, ok, broker_msg = _extract_order_ack(raw)
-        if not order_id and not ok:
-            msg = broker_msg[:900]
-            raise RuntimeError(msg or "Angel placeOrder returned no order id")
+        order_id, ok, broker_msg = angel_orders.extract_place_ack(raw)
+        if not order_id:
+            msg = broker_msg[:900] or "Angel placeOrder returned no order id"
+            # Treat API-level reject (often insufficient funds) as ORDER_REJECTED
+            tr.append_trading_log(
+                db,
+                user_id=user_id,
+                mode=mode,
+                leg=level_id,
+                action="ORDER_REJECTED",
+                symbol=instrument.tradingsymbol,
+                quantity=qty,
+                status="REJECTED",
+                message=msg,
+            )
+            raise RuntimeError(msg)
+        if not ok:
+            # Soft API fail with order id still present — confirm via order book.
+            pass
+
+        outcome = angel_orders.await_order_terminal(
+            order_id=order_id,
+            timeout_sec=min(6.0, float(settings.angel_request_timeout_sec or 15.0)),
+            poll_interval_sec=0.1,
+            cancel_if_unfilled=True,
+            **_angel_order_headers(),
+        )
+        if not outcome.filled:
+            tr.append_trading_log(
+                db,
+                user_id=user_id,
+                mode=mode,
+                leg=level_id,
+                action="ORDER_REJECTED",
+                symbol=instrument.tradingsymbol,
+                quantity=qty,
+                order_id=order_id,
+                status=outcome.status,
+                message=(
+                    f"Broker {outcome.status}: {outcome.message or broker_msg} · "
+                    f"LIMIT @ {limit_px:.2f} · LTP {ltp_at_signal:.2f}"
+                )[:900],
+            )
+            return None
+
+        fill_px = float(outcome.average_price or 0) or limit_px
         tr.append_trading_log(
             db,
             user_id=user_id,
@@ -165,12 +207,15 @@ def _execute_live_order(
             action=f"LIVE_{action}",
             symbol=instrument.tradingsymbol,
             quantity=qty,
-            entry_price=limit_px if tx == "BUY" else None,
-            exit_price=limit_px if tx == "SELL" else None,
-            order_id=order_id or None,
-            message=f"LIMIT @ {limit_px:.2f} · LTP {ltp_at_signal:.2f} · {broker_msg}"[:900],
+            entry_price=fill_px if tx == "BUY" else None,
+            exit_price=fill_px if tx == "SELL" else None,
+            order_id=order_id,
+            status="COMPLETE",
+            message=(
+                f"FILLED @ {fill_px:.2f} · LIMIT {limit_px:.2f} · LTP {ltp_at_signal:.2f} · {outcome.message or broker_msg}"
+            )[:900],
         )
-        return order_id or "OK"
+        return order_id
     except Exception as exc:  # noqa: BLE001
         tr.append_trading_log(
             db,
@@ -181,7 +226,7 @@ def _execute_live_order(
             symbol=instrument.tradingsymbol,
             message=(
                 f"Live order rejected by Angel/exchange for {instrument.tradingsymbol}: {exc}. "
-                "No order id generated, so nothing appears in Angel order book or Active Trades."
+                "No Active Trade created; runtime rolled back."
             )[:900],
         )
         return None

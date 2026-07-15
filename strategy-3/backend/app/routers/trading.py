@@ -90,8 +90,14 @@ def _sensex_from_quote() -> tuple[float, bool, str, str | None]:
                 break
         except (TypeError, ValueError):
             pass
-    source = str(row.get("quote_source") or "live")
-    err = raw.get("angel_message") if not raw.get("angel_ok") else None
+    source = str(raw.get("quote_source") or row.get("quote_source") or "live")
+    # Keep Angel message whenever quote is not live so Generate Token can appear.
+    err = None
+    if not raw.get("angel_ok") or source.lower() not in ("live",):
+        msg = raw.get("angel_message")
+        err = str(msg) if msg else ("Angel quote unavailable — regenerate token" if source.lower() != "live" else None)
+        if raw.get("token_expired") and not err:
+            err = "Angel SmartAPI token expired"
     _SENSEX_DASH_CACHE.update(
         {"t": now, "price": price, "open": bool(raw.get("market_open")), "source": source, "err": err}
     )

@@ -343,9 +343,35 @@ def process_user_tick(db, user_id: int) -> None:
                     order_type="MARKET",
                     **_angel_order_headers(),
                 )
-                order_id, ok, broker_msg = _extract_order_ack(raw)
-                if not order_id and not ok:
-                    raise RuntimeError(broker_msg or "Angel order rejected")
+                order_id, ok, broker_msg = angel_orders.extract_place_ack(raw)
+                if not order_id:
+                    raise RuntimeError(broker_msg or "Angel order rejected (no order id)")
+
+                outcome = angel_orders.await_order_terminal(
+                    order_id=order_id,
+                    timeout_sec=min(5.0, float(settings.angel_request_timeout_sec or 15.0)),
+                    poll_interval_sec=0.08,
+                    cancel_if_unfilled=True,
+                    **_angel_order_headers(),
+                )
+                if not outcome.filled:
+                    tr.append_trading_log(
+                        db,
+                        user_id=user_id,
+                        mode=mode,
+                        leg=str(act.get("side") or "-"),
+                        action="ORDER_REJECTED",
+                        symbol=instrument.tradingsymbol,
+                        quantity=lots * int(instrument.lotsize or 1),
+                        order_id=order_id,
+                        status=outcome.status,
+                        message=(f"Broker {outcome.status}: {outcome.message or broker_msg}")[:900],
+                    )
+                    live_failed = True
+                    break
+
+                fill = float(outcome.average_price or 0) or fill
+                act["fillPrice"] = fill
                 tr.append_trading_log(
                     db,
                     user_id=user_id,
@@ -356,9 +382,10 @@ def process_user_tick(db, user_id: int) -> None:
                     quantity=lots * int(instrument.lotsize or 1),
                     entry_price=fill if "EXIT" not in str(act.get("action")) else None,
                     exit_price=fill if "EXIT" in str(act.get("action")) else None,
-                    order_id=order_id or None,
+                    order_id=order_id,
+                    status="COMPLETE",
                     pnl=float(act.get("realizedPnl") or 0),
-                    message=f"{str(act.get('message') or '')} · {broker_msg}"[:900],
+                    message=f"{str(act.get('message') or '')} · FILLED @ {fill:.2f} · {outcome.message or broker_msg}"[:900],
                 )
             except Exception as exc:  # noqa: BLE001
                 tr.append_trading_log(
@@ -366,27 +393,29 @@ def process_user_tick(db, user_id: int) -> None:
                     user_id=user_id,
                     mode=mode,
                     leg=str(act.get("side") or "-"),
-                    action="ERROR",
+                    action="ORDER_REJECTED",
                     symbol=instrument.tradingsymbol,
+                    status="REJECTED",
                     message=f"Live order failed: {exc}"[:900],
                 )
                 live_failed = True
                 break
 
         kept_actions.append(act)
-        tr.append_trading_log(
-            db,
-            user_id=user_id,
-            mode=mode,
-            leg=str(act.get("side") or "-"),
-            action=str(act.get("action") or "BREAKOUT"),
-            symbol=instrument.tradingsymbol,
-            quantity=lots * int(instrument.lotsize or 1),
-            entry_price=fill if "EXIT" not in str(act.get("action")) else None,
-            exit_price=fill if "EXIT" in str(act.get("action")) else None,
-            pnl=float(act.get("realizedPnl") or 0),
-            message=str(act.get("message") or "")[:900],
-        )
+        if mode != "LIVE":
+            tr.append_trading_log(
+                db,
+                user_id=user_id,
+                mode=mode,
+                leg=str(act.get("side") or "-"),
+                action=str(act.get("action") or "BREAKOUT"),
+                symbol=instrument.tradingsymbol,
+                quantity=lots * int(instrument.lotsize or 1),
+                entry_price=fill if "EXIT" not in str(act.get("action")) else None,
+                exit_price=fill if "EXIT" in str(act.get("action")) else None,
+                pnl=float(act.get("realizedPnl") or 0),
+                message=str(act.get("message") or "")[:900],
+            )
 
     if mode == "LIVE" and live_failed:
         # Roll back trade actions, but keep newly armed reference / WAIT_BREAKOUT state.

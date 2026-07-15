@@ -99,12 +99,14 @@ export function Strategy3DashboardView() {
           <span
             className={cn(
               "rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide",
-              snap?.sensex_market_open
+              snap?.sensex_market_open && (snap?.sensex_source ?? "").toLowerCase() === "live"
                 ? "bg-[var(--success-soft)] text-[var(--success)]"
                 : "bg-[var(--surface-muted)] text-[var(--text-muted)]",
             )}
           >
-            {snap?.sensex_market_open ? "Live" : "Closed / Last"}
+            {snap?.sensex_market_open && (snap?.sensex_source ?? "").toLowerCase() === "live"
+              ? "Live"
+              : "Closed / Last"}
           </span>
         </div>
         <p className="mt-2 text-4xl font-semibold tabular-nums">

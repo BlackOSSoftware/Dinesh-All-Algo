@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+from copy import deepcopy
 from datetime import datetime, time as dt_time, timedelta, timezone
 from typing import Any
 
@@ -141,15 +142,45 @@ def _place_buy(
             oid = str(data.get("orderid") or data.get("orderId") or "")
         msg = str(raw.get("message") or raw.get("Message") or "")
         if not oid:
+            oid, _ok, ack_msg = angel_orders.extract_place_ack(raw)
+            msg = msg or ack_msg
+        if not oid:
             tr.append_trading_log(
                 db,
                 user_id=uid,
                 mode="LIVE",
                 leg=LEG_SOB,
                 action="ORDER_REJECTED",
+                status="REJECTED",
                 message=msg or json.dumps(raw)[:900],
             )
             return False
+
+        outcome = angel_orders.await_order_terminal(
+            order_id=oid,
+            timeout_sec=min(6.0, float(settings.angel_request_timeout_sec or 15.0)),
+            poll_interval_sec=0.08,
+            cancel_if_unfilled=True,
+            **_angel_headers(),
+        )
+        if not outcome.filled:
+            tr.append_trading_log(
+                db,
+                user_id=uid,
+                mode="LIVE",
+                leg=LEG_SOB,
+                action="ORDER_REJECTED",
+                strike=option_strike,
+                quantity=qty,
+                order_id=oid,
+                status=outcome.status,
+                message=(f"Broker {outcome.status}: {outcome.message or msg}")[:900],
+            )
+            return False
+
+        fill_px = float(outcome.average_price or 0.0)
+        if fill_px <= 0:
+            fill_px = syn_entry
         pos = TradePosition(
             user_id=uid,
             leg_id=LEG_SOB,
@@ -164,13 +195,13 @@ def _place_buy(
             call_sl_pts=None,
             sl_mode="sensex",
             underlying_at_entry=index_ltp,
-            entry_price=0.0,
+            entry_price=fill_px,
             exchange=exch,
             trading_symbol=resolved.tradingsymbol,
             symbol_token=str(resolved.token),
             order_id=oid,
             unique_order_id=None,
-            last_order_message=(msg or "PLACED")[:500],
+            last_order_message=(outcome.message or msg or "FILLED")[:500],
         )
         tr.create_open_position(db, pos)
         tr.append_trading_log(
@@ -178,12 +209,14 @@ def _place_buy(
             user_id=uid,
             mode="LIVE",
             leg=LEG_SOB,
-            action="LEVEL_TRIGGERED",
+            action="ORDER_FILLED",
             symbol=resolved.tradingsymbol,
             strike=resolved.strike,
             quantity=qty,
+            entry_price=fill_px,
             order_id=oid,
-            message=f"SENSEX {su} index≈{first_entry_index:g} cycle_base={cycle_base:g}",
+            status="COMPLETE",
+            message=f"SENSEX {su} FILLED @ {fill_px:g} · index≈{first_entry_index:g} cycle_base={cycle_base:g}",
         )
         return True
 
@@ -234,7 +267,7 @@ def _place_add_lot(
     index_ltp: float,
     *,
     add_lots: int,
-) -> None:
+) -> bool:
     mode = (pos.trading_mode or "PAPER").upper()
     opt_side = "PE" if (pos.side or "").upper() == "PUT" else "CE"
     option_strike = nearest_strike(index_ltp)
@@ -252,9 +285,10 @@ def _place_add_lot(
                 mode="LIVE",
                 leg=LEG_SOB,
                 action="ORDER_REJECTED",
+                status="REJECTED",
                 message="SENSEX add: no BFO mapping",
             )
-            return
+            return False
         add_qty = max(1, int(resolved.lotsize)) * add_lots
         try:
             raw = angel_orders.place_market_order(
@@ -274,31 +308,71 @@ def _place_add_lot(
                 mode="LIVE",
                 leg=LEG_SOB,
                 action="ORDER_REJECTED",
+                status="REJECTED",
                 message=str(e)[:900],
             )
-            return
-        data = raw.get("data") if isinstance(raw, dict) else None
-        oid = str((data or {}).get("orderid") or (data or {}).get("orderId") or "")
+            return False
+        oid, _ok, ack_msg = angel_orders.extract_place_ack(raw)
         if not oid:
-            return
+            tr.append_trading_log(
+                db,
+                user_id=pos.user_id,
+                mode="LIVE",
+                leg=LEG_SOB,
+                action="ORDER_REJECTED",
+                status="REJECTED",
+                message=ack_msg or "add: no order id",
+            )
+            return False
+        outcome = angel_orders.await_order_terminal(
+            order_id=oid,
+            timeout_sec=min(5.0, float(settings.angel_request_timeout_sec or 15.0)),
+            poll_interval_sec=0.08,
+            cancel_if_unfilled=True,
+            **_angel_headers(),
+        )
+        if not outcome.filled:
+            tr.append_trading_log(
+                db,
+                user_id=pos.user_id,
+                mode="LIVE",
+                leg=LEG_SOB,
+                action="ORDER_REJECTED",
+                order_id=oid,
+                status=outcome.status,
+                message=f"Add lot {outcome.status}: {outcome.message or ack_msg}"[:900],
+            )
+            return False
+        avg = float(outcome.average_price or 0) or syn_add
+        old_lots = max(1, int(pos.lots))
+        old_qty = int(pos.quantity)
+        old_ep = float(pos.entry_price or 0.0)
+        new_lots = old_lots + add_lots
+        new_qty = old_qty + add_qty
+        new_ep = (old_ep * old_qty + avg * add_qty) / max(1, new_qty) if old_ep > 0 else avg
         tr.update_position_fields(
             db,
             pos,
-            unique_order_id=f"ADD:{oid}",
-            last_order_message="ADD_PENDING",
+            lots=new_lots,
+            quantity=new_qty,
+            entry_price=new_ep,
+            unique_order_id=None,
+            last_order_message=f"ADD_FILLED lots={new_lots}",
         )
         tr.append_trading_log(
             db,
             user_id=pos.user_id,
             mode="LIVE",
             leg=LEG_SOB,
-            action="LEVEL_TRIGGERED",
+            action="LOT_ADDED",
             symbol=resolved.tradingsymbol,
             quantity=add_qty,
+            entry_price=avg,
             order_id=oid,
-            message="SENSEX averaging add placed",
+            status="COMPLETE",
+            message=f"SENSEX averaging add FILLED; total lots={new_lots}",
         )
-        return
+        return True
 
     old_lots = max(1, int(pos.lots))
     old_qty = int(pos.quantity)
@@ -326,6 +400,7 @@ def _place_add_lot(
         entry_price=syn_add,
         message=f"SENSEX AVG @ index {index_ltp:g} · strike {round(option_strike):g} {opt_side} · total lots={new_lots}",
     )
+    return True
 
 
 def _partial_exit_lots(
@@ -335,7 +410,7 @@ def _partial_exit_lots(
     p: TrendParams,
     index_ltp: float,
     close_lots: int,
-) -> None:
+) -> bool:
     lots = max(1, int(pos.lots))
     qty = int(pos.quantity)
     per = max(1, qty // lots)
@@ -360,20 +435,6 @@ def _partial_exit_lots(
                 timeout_sec=min(float(settings.angel_request_timeout_sec or 5.0), 8.0),
                 **_angel_headers(),
             )
-            oid = ""
-            data = raw.get("data") if isinstance(raw, dict) else None
-            if isinstance(data, dict):
-                oid = str(data.get("orderid") or data.get("orderId") or "")
-            tr.append_trading_log(
-                db,
-                user_id=pos.user_id,
-                mode="LIVE",
-                leg=LEG_SOB,
-                action="T1_PARTIAL",
-                quantity=closed_qty,
-                order_id=oid or None,
-                message=f"T1 partial SELL {close_lots} lot(s)",
-            )
         except RuntimeError as e:
             tr.append_trading_log(
                 db,
@@ -381,9 +442,56 @@ def _partial_exit_lots(
                 mode="LIVE",
                 leg=LEG_SOB,
                 action="ORDER_REJECTED",
+                status="REJECTED",
                 message=f"T1 partial SELL failed: {e}"[:900],
             )
-            return
+            return False
+        oid, _ok, ack_msg = angel_orders.extract_place_ack(raw)
+        if not oid:
+            tr.append_trading_log(
+                db,
+                user_id=pos.user_id,
+                mode="LIVE",
+                leg=LEG_SOB,
+                action="ORDER_REJECTED",
+                status="REJECTED",
+                message=f"T1 partial SELL no order id: {ack_msg}"[:900],
+            )
+            return False
+        outcome = angel_orders.await_order_terminal(
+            order_id=oid,
+            timeout_sec=min(5.0, float(settings.angel_request_timeout_sec or 15.0)),
+            poll_interval_sec=0.08,
+            cancel_if_unfilled=True,
+            **_angel_headers(),
+        )
+        if not outcome.filled:
+            tr.append_trading_log(
+                db,
+                user_id=pos.user_id,
+                mode="LIVE",
+                leg=LEG_SOB,
+                action="ORDER_REJECTED",
+                order_id=oid,
+                status=outcome.status,
+                message=f"T1 partial SELL {outcome.status}: {outcome.message or ack_msg}"[:900],
+            )
+            return False
+        if float(outcome.average_price or 0) > 0:
+            mark = float(outcome.average_price)
+            pnl_part = (mark - entry) * closed_qty if entry > 0 else 0.0
+        tr.append_trading_log(
+            db,
+            user_id=pos.user_id,
+            mode="LIVE",
+            leg=LEG_SOB,
+            action="ORDER_FILLED",
+            quantity=closed_qty,
+            exit_price=mark,
+            order_id=oid,
+            status="COMPLETE",
+            message=f"T1 partial SELL FILLED {close_lots} lot(s) @ {mark:g}",
+        )
 
     tr.update_position_fields(db, pos, lots=rem_lots, quantity=rem_qty, sl_mode="sensex_t1_done")
     tr.append_trading_log(
@@ -398,6 +506,7 @@ def _partial_exit_lots(
         pnl=pnl_part,
         message=f"T1 partial closed {close_lots} lot(s); remaining {rem_lots}",
     )
+    return True
 
 
 def _open_initial(
@@ -412,7 +521,7 @@ def _open_initial(
     first_entry: float,
     lots: int,
     entry_kind: EntryKind = EntryKind.INITIAL,
-) -> None:
+) -> bool:
     su = side.upper()
     if su == "CALL":
         t1 = first_entry + p.tp1_pts_initial
@@ -438,6 +547,8 @@ def _open_initial(
         runtime["re_entry_count"] = int(runtime.get("re_entry_count") or 0)
         runtime["flat_mode"] = None
         _persist_runtime(db, st_row.user_id, runtime)
+        return True
+    return False
 
 
 def _flat_mode_from_state(state: EngineState) -> str | None:
@@ -579,15 +690,16 @@ def _execute_core_signal(
     index_ltp: float,
     *,
     pos: TradePosition | None,
-) -> None:
+) -> bool:
+    """Apply signal. Returns False when a LIVE broker order was rejected (no state advance)."""
     uid = st_row.user_id
 
     if sig.kind in (SignalKind.OPEN_INITIAL, SignalKind.OPEN_AVERAGE):
         if pos is not None:
             if sig.kind == SignalKind.OPEN_AVERAGE and not str(pos.unique_order_id or "").upper().startswith("ADD:"):
-                _place_add_lot(db, pos, cfg, p, index_ltp, add_lots=sig.lots)
-            return
-        _open_initial(
+                return _place_add_lot(db, pos, cfg, p, index_ltp, add_lots=sig.lots)
+            return True
+        return _open_initial(
             db,
             st_row,
             cfg,
@@ -599,25 +711,27 @@ def _execute_core_signal(
             lots=sig.lots,
             entry_kind=sig.entry_kind,
         )
-        return
 
     if pos is None:
-        return
+        return True
 
     if sig.kind == SignalKind.PARTIAL_TP1:
         close_lots = sig.close_lots or tp1_close_lots(p)
         if int(pos.lots) > close_lots:
-            _partial_exit_lots(db, pos, cfg, p, index_ltp, close_lots)
+            ok = _partial_exit_lots(db, pos, cfg, p, index_ltp, close_lots)
+            if not ok:
+                return False
             pos = tr.get_open_position_by_leg(db, uid, LEG_SOB)
             if pos:
                 tr.update_position_fields(db, pos, sl_mode="sensex_t1_done")
         else:
             tr.update_position_fields(db, pos, sl_mode="sensex_t1_done")
-        return
+        return True
 
     if sig.kind in (SignalKind.CLOSE_TP2, SignalKind.CLOSE_SL, SignalKind.CLOSE_SESSION):
         reason = sig.exit_reason or sig.kind.value
-        _close_sob(db, pos, reason, index_ltp)
+        return bool(_close_sob(db, pos, reason, index_ltp))
+    return True
 
 
 def tick_sensex_adaptive_trend_session(
@@ -641,12 +755,40 @@ def tick_sensex_adaptive_trend_session(
     runtime = tr.load_strategy_runtime(cfg)
 
     pos = tr.get_open_position_by_leg(db, uid, LEG_SOB)
-    if pos and pos.trading_mode == "LIVE" and float(pos.entry_price or 0) <= 0 and pos.order_id:
+    pending_reject_cleanup = bool(
+        pos and pos.trading_mode == "LIVE" and float(pos.entry_price or 0) <= 0 and pos.order_id
+    )
+    if pending_reject_cleanup:
         _poll_live_entry_fill(db, pos)
     if pos and pos.trading_mode == "LIVE":
         _poll_live_add_fill(db, pos, cfg)
 
     pos = tr.get_open_position_by_leg(db, uid, LEG_SOB)
+    if pending_reject_cleanup and pos is None:
+        # Entry never filled / broker rejected — wipe open-cycle runtime.
+        runtime.update(
+            {
+                "flat_mode": None,
+                "trail_extreme": None,
+                "initial_entry_consumed": False,
+                "core_lots": 0,
+                "avg_lots": 0,
+            }
+        )
+        for k in (
+            "entry_kind",
+            "sl_level",
+            "t1_level_avg",
+            "t1_level_core",
+            "avg_t1_done",
+            "core_t1_done",
+            "cycle_extreme",
+            "adaptive_ref",
+            "cycle_id",
+            "entries_filled",
+        ):
+            runtime.pop(k, None)
+        _persist_runtime(db, uid, runtime)
 
     if str(cfg.get("slMode") or "auto") == "auto" and _past_or_at_session_end(now, auto_sq):
         while True:
@@ -690,6 +832,7 @@ def tick_sensex_adaptive_trend_session(
         _persist_runtime(db, uid, runtime)
         return
 
+    runtime_before = deepcopy(runtime)
     state = _state_from_runtime(runtime, base_price=float(base), pos=pos, p=p)
     session_end = _past_or_at_session_end(now, auto_sq)
     bar = BarSlice(
@@ -702,9 +845,17 @@ def tick_sensex_adaptive_trend_session(
     )
     state, signals = process_bar(state, p, bar, session_end=session_end)
 
+    broker_ok = True
     for sig in signals:
         pos = tr.get_open_position_by_leg(db, uid, LEG_SOB)
-        _execute_core_signal(db, st_row, cfg, p, sig, index_ltp, pos=pos)
+        if not _execute_core_signal(db, st_row, cfg, p, sig, index_ltp, pos=pos):
+            broker_ok = False
+            break
+
+    if not broker_ok:
+        # Rejected LIVE order: do not advance strategy runtime (prevents phantom SL/TP).
+        _persist_runtime(db, uid, runtime_before)
+        return
 
     runtime = _runtime_from_state(runtime, state)
     _persist_runtime(db, uid, runtime)

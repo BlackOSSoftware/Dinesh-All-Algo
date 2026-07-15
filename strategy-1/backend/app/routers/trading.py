@@ -201,10 +201,11 @@ def list_active_positions(user: User = Depends(get_current_user), db: Session = 
     rows = tr.list_open_positions(db, user.id)
     out: list[ActivePositionOut] = []
     for p in rows:
-        st = "PENDING_FILL" if p.trading_mode == "LIVE" and float(p.entry_price or 0) <= 0 else "OPEN"
+        # LIVE positions appear in Active Trades only after broker fill confirmation.
+        if (p.trading_mode or "").upper() == "LIVE" and float(p.entry_price or 0) <= 0:
+            continue
+        st = "OPEN"
         msg = (p.last_order_message or "").strip()
-        if st == "PENDING_FILL" and msg and "reject" in msg.lower():
-            st = "REJECTED"
         mark = _synthetic_option_mark(p, idx) if idx > 0 else float(p.entry_price or 0)
         entry = float(p.entry_price or 0.0)
         qty = int(p.quantity)

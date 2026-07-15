@@ -238,15 +238,16 @@ def _quote_from_cache(key: str, instrument: McxInstrument, *, error: str | None 
     price = mem[0] if mem and mem[0] > 0 else disk
     price_type = mem[4] if mem and len(mem) > 4 else ("LTP" if price > 0 else "LTP")
     source = "last" if price > 0 else "unconfigured"
+    # Keep Angel/token errors even when a stale disk price exists, so Generate Token can show.
     return QuoteResult(
         key=key,
         label=instrument.label,
         price=price,
-        market_open=False,
+        market_open=_mcx_session_open(),
         source=source,
         tradingsymbol=instrument.tradingsymbol,
         price_type=price_type,
-        error=error if price <= 0 else None,
+        error=error,
     )
 
 
@@ -277,7 +278,8 @@ def _build_result(
         key=key,
         label=instrument.label,
         price=price,
-        market_open=live,
+        # Session window is independent of whether Angel LTP succeeded.
+        market_open=session_open,
         source="live" if live else ("last" if price > 0 else source),
         tradingsymbol=instrument.tradingsymbol,
         price_type=price_type,
@@ -357,14 +359,14 @@ def _fetch_all_mcx_quotes_locked() -> list[QuoteResult]:
     if configured:
         try:
             batch = _fetch_batch_quotes(configured)
-            session_open = _mcx_session_open()
             for inst in configured:
                 if inst.key not in batch:
                     results.append(_quote_from_cache(inst.key, inst, error="No LTP in Angel response"))
                     continue
                 price, price_type, source = batch[inst.key]
-                _store_quote(inst.key, price, source, session_open, price_type)
-                results.append(_build_result(inst.key, inst, price, source, price_type))
+                built = _build_result(inst.key, inst, price, source, price_type)
+                _store_quote(inst.key, built.price, built.source, built.market_open, built.price_type)
+                results.append(built)
                 LOG.debug("MCX %s %s %s=%.2f", inst.key, inst.tradingsymbol, price_type, price)
         except Exception as exc:  # noqa: BLE001
             LOG.warning("MCX batch quote failed: %s", exc)

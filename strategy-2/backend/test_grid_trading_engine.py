@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from app.config import settings
 from app.services import angel_orders
 from app.services import trading_repository as tr
+from app.services.angel_orders import LiveOrderResult
 from app.services.grid_trading_engine import _execute_live_order, process_user_tick
 
 
@@ -14,7 +15,15 @@ def test_execute_live_order_accepts_string_orderid_payload(monkeypatch):
         "place_order",
         lambda **kwargs: {"status": True, "data": "251234567890123", "message": "SUCCESS"},
     )
+    monkeypatch.setattr(
+        angel_orders,
+        "await_order_terminal",
+        lambda **kwargs: LiveOrderResult("251234567890123", True, "COMPLETE", 311.5, "FILLED"),
+    )
     monkeypatch.setattr(tr, "append_trading_log", lambda *args, **kwargs: logs.append(kwargs))
+    monkeypatch.setattr(settings, "angel_live_trading_enabled", True, raising=False)
+    monkeypatch.setattr(settings, "angel_api_key", "test-key", raising=False)
+    monkeypatch.setattr(settings, "angel_jwt_token", "test-jwt", raising=False)
 
     instrument = SimpleNamespace(
         exchange="MCX",
@@ -39,6 +48,45 @@ def test_execute_live_order_accepts_string_orderid_payload(monkeypatch):
     assert order_id == "251234567890123"
     assert logs[-1]["action"] == "LIVE_INITIAL_BUY"
     assert logs[-1]["order_id"] == "251234567890123"
+
+
+def test_execute_live_order_rejects_insufficient_funds(monkeypatch):
+    logs = []
+    monkeypatch.setattr(
+        angel_orders,
+        "place_order",
+        lambda **kwargs: {"status": True, "data": "OID-REJ", "message": "SUCCESS"},
+    )
+    monkeypatch.setattr(
+        angel_orders,
+        "await_order_terminal",
+        lambda **kwargs: LiveOrderResult("OID-REJ", False, "REJECTED", 0.0, "Insufficient funds"),
+    )
+    monkeypatch.setattr(tr, "append_trading_log", lambda *args, **kwargs: logs.append(kwargs))
+    monkeypatch.setattr(settings, "angel_live_trading_enabled", True, raising=False)
+    monkeypatch.setattr(settings, "angel_api_key", "test-key", raising=False)
+    monkeypatch.setattr(settings, "angel_jwt_token", "test-jwt", raising=False)
+    instrument = SimpleNamespace(
+        exchange="MCX",
+        tradingsymbol="NATURALGAS25JUN26FUT",
+        token="12345",
+        lotsize=1,
+        configured=True,
+    )
+    order_id = _execute_live_order(
+        db=object(),
+        user_id=1,
+        instrument=instrument,
+        mode="LIVE",
+        action="INITIAL_BUY",
+        lots=10,
+        grid_price=311.5,
+        ltp_at_signal=311.5,
+        level_id="BASE",
+    )
+    assert order_id is None
+    assert any(log["action"] == "ORDER_REJECTED" for log in logs)
+    assert not any(log["action"] == "LIVE_INITIAL_BUY" for log in logs)
 
 
 def test_process_user_tick_executes_crossed_live_entry_without_live_skipped(monkeypatch):
@@ -99,7 +147,7 @@ def test_process_user_tick_executes_crossed_live_entry_without_live_skipped(monk
     )
     monkeypatch.setattr(
         "app.services.grid_trading_engine.get_instrument",
-        lambda _market: SimpleNamespace(
+        lambda _market, expiry_iso=None: SimpleNamespace(
             exchange="MCX",
             tradingsymbol="CRUDEOILTEST",
             token="123",
@@ -118,6 +166,11 @@ def test_process_user_tick_executes_crossed_live_entry_without_live_skipped(monk
         angel_orders,
         "place_order",
         lambda **_kwargs: {"status": True, "data": "ORDER-1", "message": "SUCCESS"},
+    )
+    monkeypatch.setattr(
+        angel_orders,
+        "await_order_terminal",
+        lambda **_kwargs: LiveOrderResult("ORDER-1", True, "COMPLETE", 319.8, "FILLED"),
     )
 
     process_user_tick(FakeDb(), 1)

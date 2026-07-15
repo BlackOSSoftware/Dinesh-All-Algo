@@ -344,10 +344,87 @@ def _sob_is_sensex_pos(pos: TradePosition) -> bool:
     return (pos.leg_id or "").upper() == LEG_SOB and str(pos.sl_mode or "").startswith("sensex")
 
 
-def _close_sob(db: Session, pos: TradePosition, reason: str, index_ltp: float) -> None:
+def _close_sob(db: Session, pos: TradePosition, reason: str, index_ltp: float) -> bool:
+    """Close position. LIVE mode places broker SELL and waits for fill confirmation."""
     mark = _synthetic_option_mark(pos, index_ltp)
     entry = float(pos.entry_price or 0.0)
     qty = int(pos.quantity)
+    mode = (pos.trading_mode or "PAPER").upper()
+
+    if mode == "LIVE" and pos.trading_symbol and pos.symbol_token and qty > 0 and entry > 0:
+        try:
+            raw = angel_orders.place_market_order(
+                exchange=(pos.exchange or "BFO").upper(),
+                tradingsymbol=pos.trading_symbol,
+                symboltoken=str(pos.symbol_token),
+                transaction_type="SELL",
+                quantity=qty,
+                product_type=(settings.angel_option_product_type or "CARRYFORWARD").upper(),
+                timeout_sec=min(float(settings.angel_request_timeout_sec or 5.0), 8.0),
+                **_angel_headers(),
+            )
+        except RuntimeError as e:
+            tr.append_trading_log(
+                db,
+                user_id=pos.user_id,
+                mode="LIVE",
+                leg=LEG_SOB,
+                action="ORDER_REJECTED",
+                symbol=pos.trading_symbol,
+                quantity=qty,
+                status="REJECTED",
+                message=f"Exit SELL failed ({reason}): {e}"[:900],
+            )
+            return False
+        oid, _ok, ack_msg = angel_orders.extract_place_ack(raw)
+        if not oid:
+            tr.append_trading_log(
+                db,
+                user_id=pos.user_id,
+                mode="LIVE",
+                leg=LEG_SOB,
+                action="ORDER_REJECTED",
+                status="REJECTED",
+                message=f"Exit SELL no order id ({reason}): {ack_msg}"[:900],
+            )
+            return False
+        outcome = angel_orders.await_order_terminal(
+            order_id=oid,
+            timeout_sec=min(5.0, float(settings.angel_request_timeout_sec or 15.0)),
+            poll_interval_sec=0.08,
+            cancel_if_unfilled=True,
+            **_angel_headers(),
+        )
+        if not outcome.filled:
+            tr.append_trading_log(
+                db,
+                user_id=pos.user_id,
+                mode="LIVE",
+                leg=LEG_SOB,
+                action="ORDER_REJECTED",
+                symbol=pos.trading_symbol,
+                quantity=qty,
+                order_id=oid,
+                status=outcome.status,
+                message=f"Exit SELL {outcome.status} ({reason}): {outcome.message or ack_msg}"[:900],
+            )
+            return False
+        if float(outcome.average_price or 0) > 0:
+            mark = float(outcome.average_price)
+        tr.append_trading_log(
+            db,
+            user_id=pos.user_id,
+            mode="LIVE",
+            leg=LEG_SOB,
+            action="ORDER_FILLED",
+            symbol=pos.trading_symbol,
+            quantity=qty,
+            exit_price=mark,
+            order_id=oid,
+            status="COMPLETE",
+            message=f"Exit SELL FILLED @ {mark:g} ({reason})",
+        )
+
     if entry <= 0:
         pnl = 0.0
         mark = 0.0
@@ -370,6 +447,7 @@ def _close_sob(db: Session, pos: TradePosition, reason: str, index_ltp: float) -
         order_id=pos.order_id,
         message=reason[:900],
     )
+    return True
 
 
 def _poll_live_add_fill(db: Session, pos: TradePosition, cfg: dict[str, Any]) -> None:
@@ -395,6 +473,21 @@ def _poll_live_add_fill(db: Session, pos: TradePosition, cfg: dict[str, Any]) ->
         avg = float(row.get("averageprice") or row.get("filledshares") or 0)
     except (TypeError, ValueError):
         avg = 0.0
+    if status in ("rejected", "cancelled"):
+        tr.append_trading_log(
+            db,
+            user_id=pos.user_id,
+            mode=pos.trading_mode,
+            leg=LEG_SOB,
+            action="ORDER_REJECTED" if "reject" in status or status == "rejected" else "ORDER_CANCELLED",
+            symbol=pos.trading_symbol,
+            quantity=pos.quantity,
+            order_id=pending_oid,
+            status="REJECTED" if "reject" in status else "CANCELLED",
+            message=f"Add lot {status}",
+        )
+        tr.update_position_fields(db, pos, unique_order_id=None, last_order_message=f"ADD_{status.upper()}")
+        return
     if status in ("complete", "filled") and avg > 0:
         old_lots = max(1, int(pos.lots))
         old_qty = int(pos.quantity)

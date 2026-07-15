@@ -16,7 +16,7 @@ import { usePathname } from 'next/navigation';
 import { normalizeLegEntryMode, useAlgoRuntime } from '@/components/trader/app-shell';
 import { defaultEntryLots, normalizeEntryLots } from '@/lib/backtest-trend-analysis';
 import { getApiBase, getStoredToken } from '@/lib/auth';
-import { isAngelTokenErrorText, refreshAngelSession } from '@/lib/angel-session';
+import { detectSensexTokenExpiry, isAngelTokenErrorText, refreshAngelSession } from '@/lib/angel-session';
 
 type AngelRow = Record<string, unknown>;
 
@@ -475,6 +475,9 @@ function useTradingDashboardState() {
         setAngelErr(nextAngel.angel_message || 'Angel SmartAPI token expired — regenerate to restore live price');
       } else if (!nextAngel.angel_ok && quotePx == null) {
         setAngelErr(nextAngel.angel_message || 'No SENSEX quote');
+      } else if (!nextAngel.angel_ok && nextAngel.angel_message) {
+        // Keep message when showing disk/last price so detection + UI stay accurate.
+        setAngelErr(nextAngel.angel_message);
       } else {
         setAngelErr(null);
       }
@@ -906,7 +909,13 @@ function useTradingDashboardState() {
     angelTokenExpired ||
     isAngelTokenErrorText(
       [angelErr, angel?.angel_message, startBarErr, startBar?.message].filter(Boolean).join('\n')
-    );
+    ) ||
+    detectSensexTokenExpiry({
+      sensex_market_open: angel?.market_open,
+      sensex_source: angel?.quote_source,
+      sensex_error: angelErr ?? angel?.angel_message,
+      sensex_price: quotePriceFromRow(pickAngelQuoteRow(angel?.fetched)) ?? undefined,
+    });
 
   /** Calculated legs use **start bar close only** — never live LTP. Refresh until close is available. */
   const startBarCloseAnchor =

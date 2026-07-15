@@ -259,9 +259,12 @@ def fetch_sensex_live_quote(*, exchange_tokens: dict[str, list[str]], mode: str)
     if price is not None and fetched and isinstance(fetched[0], dict):
         fetched[0] = {**fetched[0], "price_type": price_type, "quote_source": quote_source}
 
-    angel_ok = ok and price is not None
+    live_quote = price is not None and quote_source == "live" and ok
+    # Disk/last fallback must not look like a healthy Angel session (hides Generate Token).
+    angel_ok = live_quote
     if price is None and not msg:
         msg = "No SENSEX price in Angel response"
+    stale_during_session = session_open and price is not None and quote_source != "live"
 
     return {
         "angel_ok": angel_ok,
@@ -270,7 +273,8 @@ def fetch_sensex_live_quote(*, exchange_tokens: dict[str, list[str]], mode: str)
         "fetched": fetched,
         "unfetched": unfetched,
         "as_of": time.time(),
-        "market_open": session_open and price_type == "LTP" and quote_source == "live",
+        "market_open": session_open,
         "price_type": price_type,
-        "token_expired": _is_token_error(msg) and quote_source != "live",
+        "quote_source": quote_source,
+        "token_expired": (_is_token_error(msg) or stale_during_session) and quote_source != "live",
     }

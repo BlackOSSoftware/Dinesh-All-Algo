@@ -2,7 +2,7 @@ import { getApiBase, getStoredToken } from "@/lib/auth";
 
 export function isAngelTokenErrorText(s: string | null | undefined): boolean {
   if (!s || !s.trim()) return false;
-  return /invalid\s*token|jwt\s*expired|token\s*expired|access\s*denied|ag8001|angel\s*one\s*not\s*configured|angel_jwt_token|not\s*configured/i.test(
+  return /invalid\s*token|jwt\s*expired|token\s*expired|access\s*denied|ag8001|angel\s*one\s*not\s*configured|angel_jwt_token|not\s*configured|quote\s*unavailable|regenerate\s*token/i.test(
     s,
   );
 }
@@ -14,12 +14,45 @@ export type McxQuoteSignal = {
   price?: number;
 };
 
+function istPartsNow() {
+  const now = new Date();
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Kolkata",
+    weekday: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(now);
+  const weekday = parts.find((p) => p.type === "weekday")?.value ?? "";
+  let hour = Number(parts.find((p) => p.type === "hour")?.value ?? "0");
+  if (hour === 24) hour = 0;
+  const minute = Number(parts.find((p) => p.type === "minute")?.value ?? "0");
+  return { weekday, hour, minute };
+}
+
+/** BSE cash session 09:15–15:30 IST weekdays. */
+function isBseSessionOpenNow(): boolean {
+  const { weekday, hour, minute } = istPartsNow();
+  if (weekday === "Sat" || weekday === "Sun") return false;
+  const totalMinutes = hour * 60 + minute;
+  return totalMinutes >= 9 * 60 + 15 && totalMinutes <= 15 * 60 + 30;
+}
+
+/** MCX window used by strategies 2/4 (09:00–23:30 IST weekdays). */
+function isMcxSessionOpenNow(): boolean {
+  const { weekday, hour, minute } = istPartsNow();
+  if (weekday === "Sat" || weekday === "Sun") return false;
+  const totalMinutes = hour * 60 + minute;
+  return totalMinutes >= 9 * 60 && totalMinutes <= 23 * 60 + 30;
+}
+
 export function detectMcxQuotesTokenExpiry(quotes: McxQuoteSignal[]): boolean {
   if (!quotes.length) return false;
   if (quotes.some((q) => isAngelTokenErrorText(q.error))) return true;
-  const openWithPrice = quotes.filter((q) => q.market_open && (q.price ?? 0) > 0);
-  if (!openWithPrice.length) return false;
-  return openWithPrice.every((q) => q.source !== "live");
+  if (!isMcxSessionOpenNow()) return false;
+  const pricedQuotes = quotes.filter((q) => (q.price ?? 0) > 0);
+  if (!pricedQuotes.length) return false;
+  return pricedQuotes.every((q) => (q.source ?? "").toLowerCase() !== "live");
 }
 
 export type SensexQuoteSignal = {
@@ -31,10 +64,10 @@ export type SensexQuoteSignal = {
 
 export function detectSensexTokenExpiry(snap: SensexQuoteSignal): boolean {
   if (isAngelTokenErrorText(snap.sensex_error)) return true;
-  const open = Boolean(snap.sensex_market_open);
+  if (!isBseSessionOpenNow()) return false;
   const price = snap.sensex_price ?? 0;
   const source = (snap.sensex_source ?? "").toLowerCase();
-  return open && price > 0 && source !== "live";
+  return price > 0 && source !== "live";
 }
 
 export type RefreshResult =
