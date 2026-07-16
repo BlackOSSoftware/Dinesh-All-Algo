@@ -134,6 +134,8 @@ class DashboardOut(BaseModel):
     windows: list[WindowOut]
     realized_pnl: float
     unrealized_pnl: float
+    today_realized_pnl: float = 0.0
+    today_pnl: float = 0.0
     active_trades: list[ActivePositionOut]
     completed_trades: list[CompletedPositionOut]
     logs: list[TradingLogOut]

@@ -306,6 +306,30 @@ def close_leg_manual(
     return {"ok": True}
 
 
+@router.post("/positions/close-all")
+def close_all_positions(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    positions = tr.list_open_positions(db, user.id)
+    if not positions:
+        raise HTTPException(status_code=404, detail="No active trades to close")
+
+    # Stop the engine first so no new position can open during the bulk exit.
+    tr.save_strategy_settings(db, user.id, algo_running=False)
+    closed = 0
+    for pos in positions:
+        try:
+            manual_close_leg(db, user.id, pos.leg_id)
+            closed += 1
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Closed {closed} of {len(positions)} trades. {pos.leg_id} failed: {exc}",
+            ) from exc
+    return {"ok": True, "closed": closed}
+
+
 @router.post("/order/cancel")
 def cancel_broker_order(body: OrderCancelBody, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     if not (settings.angel_api_key or "").strip() or not (settings.angel_jwt_token or "").strip():

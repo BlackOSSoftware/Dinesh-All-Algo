@@ -40,9 +40,10 @@ from app.services.grid_logic import (
     session_reference_price,
 )
 from app.services.grid_backtest import run_grid_backtest
+from app.services.grid_trading_engine import manual_close_position
 from app.services.mcx_scrip_resolver import list_mcx_future_expiries, peek_cached_symbol_for_expiry
 from app.services.mcx_quotes import fetch_all_mcx_quotes, get_quote_by_key, quote_from_results
-from app.services.trading_engine import _angel_headers, manual_close_leg
+from app.services.trading_engine import _angel_headers
 
 router = APIRouter(prefix="/trading", tags=["trading"])
 
@@ -280,6 +281,10 @@ def get_dashboard(user: User = Depends(get_current_user), db: Session = Depends(
             )
         )
 
+    today_realized = tr.sum_completed_pnl_today_ist(db, user.id)
+    open_unrealized_rupees = sum(t.pnl for t in active_trades)
+    today_pnl = round(today_realized + open_unrealized_rupees, 2)
+
     completed_rows = tr.list_completed_positions(db, user.id, limit=100)
     completed_trades = [
         CompletedPositionOut(
@@ -344,6 +349,8 @@ def get_dashboard(user: User = Depends(get_current_user), db: Session = Depends(
         position_lots=position_lots,
         realized_pnl=float(runtime.get("realizedPnl") or 0),
         unrealized_pnl=round(unrealized, 2),
+        today_realized_pnl=round(today_realized, 2),
+        today_pnl=today_pnl,
         current_market_price=current_price,
         next_action_level=runtime.get("nextActionLevel"),
         active_trades=active_trades,
@@ -466,12 +473,36 @@ def close_leg_manual(
     db: Session = Depends(get_db),
 ):
     try:
-        manual_close_leg(db, user.id, leg_id)
+        manual_close_position(db, user.id, leg_id)
     except ValueError as e:
         if str(e) == "NO_OPEN_POSITION":
             raise HTTPException(status_code=404, detail="No open position for this leg") from e
         raise HTTPException(status_code=400, detail=str(e)) from e
     return {"ok": True}
+
+
+@router.post("/positions/close-all")
+def close_all_positions(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    positions = tr.list_open_positions(db, user.id)
+    if not positions:
+        raise HTTPException(status_code=404, detail="No active trades to close")
+
+    # Stop the grid before sending exits so it cannot add/re-enter mid-close.
+    tr.save_strategy_settings(db, user.id, algo_running=False)
+    closed = 0
+    for pos in positions:
+        try:
+            manual_close_position(db, user.id, pos.leg_id)
+            closed += 1
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Closed {closed} of {len(positions)} trades. {pos.leg_id} failed: {exc}",
+            ) from exc
+    return {"ok": True, "closed": closed}
 
 
 @router.post("/order/cancel")

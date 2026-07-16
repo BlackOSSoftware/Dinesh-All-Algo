@@ -192,6 +192,8 @@ export type DashboardSnapshot = {
   windows: WindowRow[];
   realized_pnl: number;
   unrealized_pnl: number;
+  today_realized_pnl?: number;
+  today_pnl?: number;
   active_trades: Array<{
     id: number;
     leg_id: string;

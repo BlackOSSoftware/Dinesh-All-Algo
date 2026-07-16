@@ -37,9 +37,9 @@ from app.services.breakout_logic import (
     parse_strategy_config,
 )
 from app.services.breakout_backtest import run_breakout_backtest
-from app.services.breakout_trading_engine import _in_session
+from app.services.breakout_trading_engine import _in_session, manual_close_position
 from app.services.mcx_quotes import fetch_all_mcx_quotes, get_quote_by_key, quote_from_results
-from app.services.trading_engine import _angel_headers, manual_close_leg
+from app.services.trading_engine import _angel_headers
 
 router = APIRouter(prefix="/trading", tags=["trading"])
 
@@ -231,7 +231,10 @@ def get_dashboard(user: User = Depends(get_current_user), db: Session = Depends(
         mark = current_price if current_price > 0 else float(p.entry_price or 0)
         entry = float(p.entry_price or 0.0)
         qty = int(p.quantity)
-        pnl = (mark - entry) * qty if entry > 0 else 0.0
+        if entry > 0:
+            pnl = (mark - entry) * qty if (p.side or "BUY").upper() == "BUY" else (entry - mark) * qty
+        else:
+            pnl = 0.0
         active_trades.append(
             ActivePositionOut(
                 id=p.id,
@@ -248,6 +251,10 @@ def get_dashboard(user: User = Depends(get_current_user), db: Session = Depends(
                 entry_time=_iso(p.entry_time),
             )
         )
+
+    today_realized = tr.sum_completed_pnl_today_ist(db, user.id)
+    open_unrealized_rupees = sum(t.pnl for t in active_trades)
+    today_pnl = round(today_realized + open_unrealized_rupees, 2)
 
     completed_rows = tr.list_completed_positions(db, user.id, limit=100)
     completed_trades = [
@@ -339,6 +346,8 @@ def get_dashboard(user: User = Depends(get_current_user), db: Session = Depends(
         position_lots=position_lots,
         realized_pnl=float(runtime.get("realizedPnl") or 0),
         unrealized_pnl=round(unrealized, 2),
+        today_realized_pnl=round(today_realized, 2),
+        today_pnl=today_pnl,
         current_market_price=current_price,
         next_action_level=next_action,
         phase=str(snap.get("phase") or ""),
@@ -413,7 +422,10 @@ def list_active_positions(user: User = Depends(get_current_user), db: Session = 
         px = mark if mark > 0 else float(p.entry_price or 0)
         entry = float(p.entry_price or 0.0)
         qty = int(p.quantity)
-        pnl = (px - entry) * qty if entry > 0 else 0.0
+        if entry > 0:
+            pnl = (px - entry) * qty if (p.side or "BUY").upper() == "BUY" else (entry - px) * qty
+        else:
+            pnl = 0.0
         out.append(
             ActivePositionOut(
                 id=p.id,
@@ -484,12 +496,36 @@ def close_leg_manual(
     db: Session = Depends(get_db),
 ):
     try:
-        manual_close_leg(db, user.id, leg_id)
+        manual_close_position(db, user.id, leg_id)
     except ValueError as e:
         if str(e) == "NO_OPEN_POSITION":
             raise HTTPException(status_code=404, detail="No open position for this leg") from e
         raise HTTPException(status_code=400, detail=str(e)) from e
     return {"ok": True}
+
+
+@router.post("/positions/close-all")
+def close_all_positions(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    positions = tr.list_open_positions(db, user.id)
+    if not positions:
+        raise HTTPException(status_code=404, detail="No active trades to close")
+
+    # Stop breakout processing first so reverse/new entries cannot fire mid-close.
+    tr.save_strategy_settings(db, user.id, algo_running=False)
+    closed = 0
+    for pos in positions:
+        try:
+            manual_close_position(db, user.id, pos.leg_id)
+            closed += 1
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Closed {closed} of {len(positions)} trades. {pos.leg_id} failed: {exc}",
+            ) from exc
+    return {"ok": True, "closed": closed}
 
 
 @router.post("/order/cancel")

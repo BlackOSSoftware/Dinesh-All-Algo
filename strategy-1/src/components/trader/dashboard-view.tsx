@@ -96,6 +96,8 @@ export function DashboardView() {
   const { engineOn, engineCheckPending } = useEngineStatus();
   const [clearModal, setClearModal] = useState(false);
   const [clearLogsModal, setClearLogsModal] = useState(false);
+  const [closeAllModal, setCloseAllModal] = useState(false);
+  const [closingAll, setClosingAll] = useState(false);
 
   const livePx = t.liveIndex;
   const basePrice = t.basePrice;
@@ -114,6 +116,28 @@ export function DashboardView() {
 
   const completedRows = serverOnline ? d.completedTrades : [];
   const logRows = serverOnline ? d.tradingLogs : [];
+
+  // Today's PnL (IST): realized from trades closed today + unrealized from open trades.
+  const istDay = (iso: string | null | undefined) => {
+    if (!iso) return "";
+    const dt = new Date(iso);
+    if (Number.isNaN(dt.getTime())) return "";
+    return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(dt);
+  };
+  const todayIst = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(new Date());
+  const todayRealized = completedRows
+    .filter((c) => istDay(c.exit_time) === todayIst)
+    .reduce((sum, c) => sum + (c.pnl ?? 0), 0);
+  const todayPnl = todayRealized + (serverOnline ? d.activeTrades : []).reduce((sum, a) => sum + (a.pnl || 0), 0);
+
+  async function confirmCloseAll() {
+    setClosingAll(true);
+    try {
+      await d.closeAllTrades();
+    } finally {
+      setClosingAll(false);
+    }
+  }
 
   return (
     <div className="mx-auto max-w-[1400px] space-y-4 pb-8">
@@ -194,6 +218,11 @@ export function DashboardView() {
             value={sessionDiff != null ? `${sessionDiff >= 0 ? "+" : ""}${sessionDiff.toFixed(0)}` : "—"}
             tone={sessionDiff != null ? (sessionDiff >= 0 ? "ok" : "bad") : "neutral"}
           />
+          <StatusTile
+            label="Today's P&L"
+            value={serverOnline ? d.fmtInr(todayPnl) : "—"}
+            tone={!serverOnline ? "neutral" : todayPnl >= 0 ? "ok" : "bad"}
+          />
           <StatusTile label="Position" value={directionLabel} tone={directionLabel !== "Flat" ? "ok" : "neutral"} />
           <StatusTile label="First Entry" value={d.firstEntryEnabled ? "On" : "Off"} />
           <StatusTile label="Algo" value={d.algoEnabled ? "On" : "Off"} tone={d.algoEnabled ? "ok" : "neutral"} />
@@ -229,6 +258,16 @@ export function DashboardView() {
               title="Active Trades"
               compact
               subtitle={`${d.activeTrades.length} open position${d.activeTrades.length === 1 ? "" : "s"}`}
+              action={
+                <button
+                  type="button"
+                  disabled={d.activeTrades.length === 0 || closingAll}
+                  onClick={() => setCloseAllModal(true)}
+                  className="rounded border border-rose-500/40 px-2.5 py-1 text-[10px] font-semibold text-rose-600 hover:bg-rose-500/10 disabled:opacity-40"
+                >
+                  {closingAll ? "Closing all…" : "Close All Trades"}
+                </button>
+              }
             />
             <div className="overflow-x-auto rounded-lg border border-[var(--border-subtle)]">
               <table className="w-full min-w-[1200px] border-collapse text-xs">
@@ -551,6 +590,23 @@ export function DashboardView() {
         onConfirm={() => {
           setClearLogsModal(false);
           void d.clearTradingLogs();
+        }}
+      />
+
+      <ConfirmModal
+        open={closeAllModal}
+        title="Close all active trades?"
+        message={
+          d.tradingMode === "LIVE"
+            ? `Algo will stop first. ${d.activeTrades.length} active trade(s) will be exited at Angel using MARKET orders; each local trade closes only after broker fill confirmation.`
+            : `Algo will stop and all ${d.activeTrades.length} paper trade(s) will close at the current mark price.`
+        }
+        confirmLabel="Close All Trades"
+        danger
+        onCancel={() => setCloseAllModal(false)}
+        onConfirm={() => {
+          setCloseAllModal(false);
+          void confirmCloseAll();
         }}
       />
 

@@ -8,7 +8,7 @@ import { ConfirmModal } from "@/components/trader/ui/confirm-modal";
 import { CardTitle, PageHeader, PremiumCard } from "@/components/trader/ui/primitives";
 import { useStrategy3Dashboard } from "@/hooks/use-strategy3-dashboard";
 import { detectSensexTokenExpiry } from "@/lib/angel-session";
-import { setAlgoRunning, setTradingMode } from "@/lib/strategy3/api";
+import { closeAllTrades, closeTradeLeg, setAlgoRunning, setTradingMode } from "@/lib/strategy3/api";
 import type { TradingMode } from "@/lib/strategy3/types";
 import { cn } from "@/components/ui";
 
@@ -26,12 +26,17 @@ function fmtTime(iso?: string | null) {
 }
 
 export function Strategy3DashboardView() {
-  const { snap, loading, error, serverOnline, clearCompleted, clearLogs } = useStrategy3Dashboard();
+  const { snap, loading, error, refresh, serverOnline, clearCompleted, clearLogs } = useStrategy3Dashboard();
   const { algoRunning, setAlgoRunningLocal } = useEngineStatus();
   const [mode, setMode] = useState<TradingMode>("PAPER");
   const [busy, setBusy] = useState(false);
   const [clearLogsModal, setClearLogsModal] = useState(false);
   const [clearHistoryModal, setClearHistoryModal] = useState(false);
+  const [closeLeg, setCloseLeg] = useState<string | null>(null);
+  const [closingLeg, setClosingLeg] = useState<string | null>(null);
+  const [closeAllModal, setCloseAllModal] = useState(false);
+  const [closingAll, setClosingAll] = useState(false);
+  const [closeError, setCloseError] = useState<string | null>(null);
 
   useEffect(() => {
     if (snap) {
@@ -57,6 +62,32 @@ export function Strategy3DashboardView() {
       setMode(next);
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function confirmCloseLeg(legId: string) {
+    setClosingLeg(legId);
+    setCloseError(null);
+    try {
+      await closeTradeLeg(legId);
+    } catch (err) {
+      setCloseError(err instanceof Error ? err.message : "Failed to close trade");
+    } finally {
+      setClosingLeg(null);
+    }
+  }
+
+  async function confirmCloseAll() {
+    setClosingAll(true);
+    setCloseError(null);
+    try {
+      await closeAllTrades();
+      setAlgoRunningLocal(false);
+      await refresh();
+    } catch (err) {
+      setCloseError(err instanceof Error ? err.message : "Failed to close all trades");
+    } finally {
+      setClosingAll(false);
     }
   }
 
@@ -160,7 +191,15 @@ export function Strategy3DashboardView() {
         </div>
         <p className="mt-2 text-xs text-[var(--text-muted)]">
           Algo: {algoRunning ? "Running" : "Stopped"} · Realized {fmtPx(snap?.realized_pnl ?? 0)} · Unrealized{" "}
-          {fmtPx(snap?.unrealized_pnl ?? 0)}
+          {fmtPx(snap?.unrealized_pnl ?? 0)} ·{" "}
+          <span
+            className={cn(
+              "font-semibold",
+              (snap?.today_pnl ?? 0) >= 0 ? "text-[var(--success)]" : "text-[var(--danger)]",
+            )}
+          >
+            Today&apos;s P&amp;L {fmtPx(snap?.today_pnl ?? 0)}
+          </span>
         </p>
       </PremiumCard>
 
@@ -193,9 +232,32 @@ export function Strategy3DashboardView() {
                     <td className="px-3 py-2 tabular-nums">
                       {w.reference_close ? fmtPx(w.reference_close) : "—"}
                     </td>
-                    <td className="px-3 py-2 tabular-nums">{w.ce?.strike ? fmtPx(w.ce.strike) : "—"}</td>
-                    <td className="px-3 py-2 tabular-nums">{w.pe?.strike ? fmtPx(w.pe.strike) : "—"}</td>
-                    <td className="px-3 py-2 text-[var(--text-muted)]">{w.ce?.skip_reason ?? "—"}</td>
+                    <td className="px-3 py-2 tabular-nums">
+                      {w.ce?.strike ? fmtPx(w.ce.strike) : "—"}
+                      {w.ce?.entry_price != null ? (
+                        <span className="block text-[10px] text-[var(--text-muted)]">
+                          Entry {fmtPx(w.ce.entry_price)}
+                        </span>
+                      ) : null}
+                    </td>
+                    <td className="px-3 py-2 tabular-nums">
+                      {w.pe?.strike ? fmtPx(w.pe.strike) : "—"}
+                      {w.pe?.entry_price != null ? (
+                        <span className="block text-[10px] text-[var(--text-muted)]">
+                          Entry {fmtPx(w.pe.entry_price)}
+                        </span>
+                      ) : null}
+                    </td>
+                    <td className="px-3 py-2 text-[var(--text-muted)]">
+                      {w.ce?.skip_reason && w.pe?.skip_reason && w.ce.skip_reason !== w.pe.skip_reason ? (
+                        <>
+                          <span className="block">CE: {w.ce.skip_reason}</span>
+                          <span className="block">PE: {w.pe.skip_reason}</span>
+                        </>
+                      ) : (
+                        (w.ce?.skip_reason ?? w.pe?.skip_reason ?? "—")
+                      )}
+                    </td>
                   </tr>
                 ))
               )}
@@ -204,10 +266,16 @@ export function Strategy3DashboardView() {
         </div>
       </PremiumCard>
 
+      {closeError ? (
+        <p className="rounded-xl border border-[var(--danger-soft)] bg-[var(--danger-soft)] px-4 py-3 text-sm text-[var(--danger)]">
+          Close trade failed: {closeError}
+        </p>
+      ) : null}
+
       <div className="grid gap-4 lg:grid-cols-2">
         <DataTable
           title="Active Trades"
-          headers={["Leg", "Strike", "Entry", "Mark", "P&L", "Mode"]}
+          headers={["Leg", "Strike", "Entry", "Mark", "P&L", "Mode", "Close"]}
           rows={activeTrades.map((t) => [
             t.side,
             fmtPx(t.strike),
@@ -215,8 +283,27 @@ export function Strategy3DashboardView() {
             fmtPx(t.current_price),
             fmtPx(t.pnl),
             t.trading_mode,
+            <button
+              key={`close-${t.id}`}
+              type="button"
+              disabled={closingLeg != null}
+              onClick={() => setCloseLeg(t.leg_id)}
+              className="rounded-md border border-[var(--danger)] px-2 py-1 text-[11px] font-medium text-[var(--danger)] hover:bg-[var(--danger-soft)] disabled:opacity-50"
+            >
+              {closingLeg === t.leg_id ? "Closing…" : "Close"}
+            </button>,
           ])}
           empty={serverOnline ? "No open trades" : "Server offline"}
+          action={
+            <button
+              type="button"
+              disabled={activeTrades.length === 0 || closingAll || closingLeg != null}
+              onClick={() => setCloseAllModal(true)}
+              className="rounded-lg border border-[var(--danger)] px-3 py-1 text-[11px] font-semibold text-[var(--danger)] hover:bg-[var(--danger-soft)] disabled:opacity-50"
+            >
+              {closingAll ? "Closing all…" : "Close All Trades"}
+            </button>
+          }
         />
         <DataTable
           title="Completed Trades"
@@ -277,6 +364,41 @@ export function Strategy3DashboardView() {
       />
 
       <ConfirmModal
+        open={closeLeg != null}
+        title={`Close ${closeLeg ?? ""} trade?`}
+        message={
+          mode === "LIVE"
+            ? "This places a MARKET SELL at the broker and closes the trade after fill confirmation."
+            : "This closes the paper trade at the current mark price."
+        }
+        confirmLabel="Close Trade"
+        danger
+        onCancel={() => setCloseLeg(null)}
+        onConfirm={() => {
+          const leg = closeLeg;
+          setCloseLeg(null);
+          if (leg) void confirmCloseLeg(leg);
+        }}
+      />
+
+      <ConfirmModal
+        open={closeAllModal}
+        title="Close all active trades?"
+        message={
+          mode === "LIVE"
+            ? `Algo will stop first. ${activeTrades.length} active trade(s) will be exited at the broker using MARKET orders; each local trade closes only after broker fill confirmation.`
+            : `Algo will stop and all ${activeTrades.length} paper trade(s) will close at the current mark price.`
+        }
+        confirmLabel="Close All Trades"
+        danger
+        onCancel={() => setCloseAllModal(false)}
+        onConfirm={() => {
+          setCloseAllModal(false);
+          void confirmCloseAll();
+        }}
+      />
+
+      <ConfirmModal
         open={clearHistoryModal}
         title="Clear completed trades?"
         message="This permanently deletes all completed trade history. Open positions are not affected."
@@ -301,7 +423,7 @@ function DataTable({
 }: {
   title: string;
   headers: string[];
-  rows: string[][];
+  rows: (string | number | ReactNode)[][];
   empty: string;
   action?: ReactNode;
 }) {

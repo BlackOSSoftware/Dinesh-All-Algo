@@ -1266,6 +1266,27 @@ function useTradingDashboardState() {
     []
   );
 
+  const closeAllTrades = useCallback(async () => {
+    const token = getStoredToken();
+    if (!token) return false;
+    try {
+      const res = await fetch(`${getApiBase()}/trading/positions/close-all`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+        setPersistError(httpErrorDetail(data, `HTTP ${res.status}`));
+        return false;
+      }
+      setPersistError(null);
+      return true;
+    } catch {
+      setPersistError('Close all trades request failed');
+      return false;
+    }
+  }, []);
+
   const clearCompletedTrades = useCallback(async () => {
     const token = getStoredToken();
     if (!token) return;
@@ -1425,6 +1446,7 @@ function useTradingDashboardState() {
     clearingLogs,
     pushSettingsToServer,
     closeLegManual,
+    closeAllTrades,
     clearCompletedTrades,
     clearTradingLogs,
     buildDashboardConfig,

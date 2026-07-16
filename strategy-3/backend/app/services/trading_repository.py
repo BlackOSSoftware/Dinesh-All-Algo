@@ -222,6 +222,22 @@ def list_completed_positions(db: Session, user_id: int, limit: int = 200) -> lis
     return list(db.scalars(q).all())
 
 
+def sum_completed_pnl_today_ist(db: Session, user_id: int) -> float:
+    """Total realized PnL of positions closed since IST midnight today."""
+    tz = _ist_tz()
+    now = datetime.now(tz)
+    start_local = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    start_utc = start_local.astimezone(timezone.utc)
+    total = db.scalar(
+        select(func.coalesce(func.sum(TradePosition.pnl), 0.0)).where(
+            TradePosition.user_id == user_id,
+            TradePosition.status == "CLOSED",
+            TradePosition.exit_time >= start_utc,
+        )
+    )
+    return float(total or 0.0)
+
+
 def delete_all_completed_positions(db: Session, user_id: int) -> int:
     """Delete all CLOSED trade rows for this user. Returns approximate deleted count."""
     res = db.execute(

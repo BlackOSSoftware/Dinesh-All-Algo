@@ -18,6 +18,7 @@ from app.services import angel_orders
 from app.services import trading_repository as tr
 from app.services.grid_logic import (
     default_runtime,
+    fresh_grid_runtime,
     grid_order_price,
     load_runtime,
     parse_strategy_config,
@@ -345,9 +346,28 @@ def _record_upper_exit(
     """Upper grid exit: completed leg row + reduce BASE open lots."""
     if lots <= 0:
         return
+    # If this U level was re-entered earlier (open row exists), close that row directly
+    # so entry price/time come from the actual re-entry fill.
+    own = tr.get_open_position_by_leg(db, user_id, level_id)
+    if own:
+        _close_open_leg(
+            db,
+            user_id=user_id,
+            instrument=instrument,
+            leg_id=level_id,
+            lots=lots,
+            exit_px=exit_px,
+            exit_reason="EXIT",
+        )
+        return
+    base = tr.get_open_position_by_leg(db, user_id, "BASE")
+    # Entry must be the actual BASE fill price (the lots sold at U levels came from BASE),
+    # not the runtime weighted average across D adds.
+    base_entry = float(base.entry_price or 0) if base else 0.0
+    if base_entry > 0:
+        entry_px = base_entry
     qty = lots * instrument.lotsize
     pnl = _position_pnl(entry_px, exit_px, qty)
-    base = tr.get_open_position_by_leg(db, user_id, "BASE")
     now = datetime.now(timezone.utc)
     entry_time = (base.entry_time if base and base.entry_time else now)
     db.add(
@@ -387,6 +407,149 @@ def _record_upper_exit(
             base.quantity = int(base.quantity) - reduce_qty
             db.add(base)
     db.commit()
+
+
+def manual_close_position(db, user_id: int, leg_id: str) -> None:
+    """Close one open grid leg from the dashboard Close button.
+
+    PAPER: closes the DB row at current market price.
+    LIVE: places a broker MARKET SELL first and only closes after the fill confirms.
+    Grid runtime is synced so the engine does not treat the lots as still open.
+    """
+    lid = (leg_id or "").strip().upper()
+    pos = tr.get_open_position_by_leg(db, user_id, lid)
+    if not pos:
+        raise ValueError("NO_OPEN_POSITION")
+
+    cfg = tr.load_config_dict(db, user_id)
+    parsed = parse_strategy_config(cfg, as_of=_ist_now())
+    quote = get_quote_by_key(parsed["market"])
+    mark = float(quote.price if quote and quote.price > 0 else 0)
+    if mark <= 0:
+        mark = float(load_runtime(cfg).get("lastPrice") or 0)
+    entry = float(pos.entry_price or 0)
+    if mark <= 0:
+        mark = entry
+    qty = int(pos.quantity or 0)
+    lots = int(pos.lots or 0)
+    mode = (pos.trading_mode or "PAPER").upper()
+    exit_px = round(mark, 2) if mark > 0 else entry
+
+    if mode == "LIVE":
+        if not settings.angel_api_key.strip() or not settings.angel_jwt_token.strip():
+            raise ValueError("Angel One not configured — cannot close LIVE trade at broker")
+        if not pos.trading_symbol or not pos.symbol_token or qty <= 0:
+            raise ValueError("Position has no broker symbol/token — cannot close at broker")
+        try:
+            raw = angel_orders.place_order(
+                exchange=(pos.exchange or "MCX").upper(),
+                tradingsymbol=pos.trading_symbol,
+                symboltoken=str(pos.symbol_token),
+                transaction_type="SELL",
+                quantity=qty,
+                product_type="CARRYFORWARD",
+                order_type="MARKET",
+                timeout_sec=float(settings.angel_request_timeout_sec or 15.0),
+                **_angel_order_headers(),
+            )
+            order_id, _ok, broker_msg = angel_orders.extract_place_ack(raw)
+            if not order_id:
+                raise RuntimeError(broker_msg or "Angel placeOrder returned no order id")
+            outcome = angel_orders.await_order_terminal(
+                order_id=order_id,
+                timeout_sec=min(8.0, float(settings.angel_request_timeout_sec or 15.0)),
+                poll_interval_sec=0.1,
+                cancel_if_unfilled=True,
+                **_angel_order_headers(),
+            )
+            if not outcome.filled:
+                raise RuntimeError(f"Broker {outcome.status}: {outcome.message or broker_msg}")
+            exit_px = float(outcome.average_price or 0) or exit_px
+            tr.append_trading_log(
+                db,
+                user_id=user_id,
+                mode=mode,
+                leg=lid,
+                action="LIVE_MANUAL_CLOSE",
+                symbol=pos.trading_symbol,
+                quantity=qty,
+                exit_price=exit_px,
+                order_id=order_id,
+                status="COMPLETE",
+                message=f"Manual close SELL FILLED @ {exit_px:.2f}"[:900],
+            )
+        except Exception as exc:  # noqa: BLE001
+            tr.append_trading_log(
+                db,
+                user_id=user_id,
+                mode=mode,
+                leg=lid,
+                action="ERROR",
+                symbol=pos.trading_symbol,
+                quantity=qty,
+                message=f"Manual close rejected by broker: {exc}"[:900],
+            )
+            raise ValueError(f"Broker close failed: {exc}") from exc
+
+    pnl = _position_pnl(entry, exit_px, qty)
+    tr.close_position(db, pos, exit_price=exit_px, exit_reason="MANUAL_CLOSE", pnl=pnl)
+    tr.append_trading_log(
+        db,
+        user_id=user_id,
+        mode=mode,
+        leg=lid,
+        action="MANUAL_CLOSE",
+        symbol=pos.trading_symbol,
+        quantity=qty,
+        entry_price=entry,
+        exit_price=exit_px,
+        pnl=pnl,
+        message=f"Manual close {lots} lot(s) @ {exit_px:.2f}"[:900],
+    )
+
+    # Sync grid runtime so the engine does not still count these lots.
+    runtime = load_runtime(cfg)
+    position = int(runtime.get("positionLots") or 0)
+    avg_entry = float(runtime.get("avgEntryPrice") or 0)
+    realized = float(runtime.get("realizedPnl") or 0)
+    closed_lots = min(lots, position) if position > 0 else 0
+    if closed_lots > 0:
+        realized += (exit_px - (avg_entry if avg_entry > 0 else entry)) * closed_lots
+        position -= closed_lots
+
+    remaining_open = tr.list_open_positions(db, user_id)
+    if position <= 0 or not remaining_open:
+        # Fully flat — re-arm a clean grid and stop the algo so it cannot instantly re-enter.
+        fresh = fresh_grid_runtime(mark)
+        fresh["realizedPnl"] = round(realized, 2)
+        ref = float(runtime.get("sessionReferencePrice") or 0)
+        if ref > 0:
+            fresh["sessionReferencePrice"] = ref
+        runtime = fresh
+        row = db.scalar(select(StrategySettings).where(StrategySettings.user_id == user_id))
+        if row and bool(row.algo_running):
+            tr.save_strategy_settings(db, user_id, algo_running=False)
+            tr.append_trading_log(
+                db,
+                user_id=user_id,
+                mode=mode,
+                leg="-",
+                action="ALGO_STOPPED",
+                message="Algo stopped after manual close (position flat)",
+            )
+    else:
+        runtime["positionLots"] = position
+        runtime["realizedPnl"] = round(realized, 2)
+        states = dict(runtime.get("levelStates") or {})
+        if lid.startswith("D") or lid.startswith("U"):
+            states[lid] = "neutral"
+        runtime["levelStates"] = states
+        if lid == "BASE":
+            runtime["baseEntered"] = position > 0
+
+    latest = tr.load_config_dict(db, user_id)
+    latest["grid_runtime"] = runtime
+    tr.save_strategy_settings(db, user_id, config=latest)
 
 
 def _migrate_legacy_grid_main(db, user_id: int) -> None:

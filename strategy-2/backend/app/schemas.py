@@ -144,6 +144,8 @@ class DashboardOut(BaseModel):
     position_lots: int
     realized_pnl: float
     unrealized_pnl: float
+    today_realized_pnl: float = 0.0
+    today_pnl: float = 0.0
     current_market_price: float
     next_action_level: str | None = None
     active_trades: list[ActivePositionOut]

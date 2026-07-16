@@ -284,9 +284,135 @@ def _sync_position(
         open_pos = tr.get_open_position_by_leg(db, user_id, leg)
         if open_pos:
             entry = float(open_pos.entry_price or 0)
-            qty_lots = int(open_pos.lots or lots)
-            pnl = (fill - entry) * qty_lots if open_pos.side == "BUY" else (entry - fill) * qty_lots
+            # Rupee PnL: use full quantity (lots × lotsize), matching active-trade PnL.
+            qty = int(open_pos.quantity or 0) or int(open_pos.lots or lots) * int(instrument.lotsize or 1)
+            pnl = (fill - entry) * qty if open_pos.side == "BUY" else (entry - fill) * qty
             tr.close_position(db, open_pos, exit_price=fill, exit_reason=act, pnl=pnl)
+
+
+def manual_close_position(db, user_id: int, leg_id: str) -> None:
+    """Close an open breakout leg from the dashboard Close button.
+
+    PAPER: closes the DB row at current market price.
+    LIVE: places the opposite MARKET order at the broker and waits for fill confirmation.
+    Breakout runtime is marked DONE so the engine does not keep trading the closed leg.
+    """
+    lid = (leg_id or "").strip().upper()
+    pos = tr.get_open_position_by_leg(db, user_id, lid)
+    if not pos:
+        raise ValueError("NO_OPEN_POSITION")
+
+    cfg = tr.load_config_dict(db, user_id)
+    parsed = parse_strategy_config(cfg)
+    quote = get_quote_by_key(parsed["market"])
+    mark = float(quote.price if quote and quote.price > 0 else 0)
+    runtime = load_runtime(cfg)
+    if mark <= 0:
+        mark = _num(runtime.get("lastPrice"))
+    entry = float(pos.entry_price or 0)
+    if mark <= 0:
+        mark = entry
+    qty = int(pos.quantity or 0)
+    lots = int(pos.lots or 0)
+    side = (pos.side or "BUY").upper()
+    mode = (pos.trading_mode or "PAPER").upper()
+    exit_px = round(mark, 2) if mark > 0 else entry
+
+    if mode == "LIVE":
+        if not settings.angel_api_key.strip() or not settings.angel_jwt_token.strip():
+            raise ValueError("Angel One not configured — cannot close LIVE trade at broker")
+        if not pos.trading_symbol or not pos.symbol_token or qty <= 0:
+            raise ValueError("Position has no broker symbol/token — cannot close at broker")
+        tx = "SELL" if side == "BUY" else "BUY"
+        try:
+            raw = angel_orders.place_order(
+                exchange=(pos.exchange or "MCX").upper(),
+                tradingsymbol=pos.trading_symbol,
+                symboltoken=str(pos.symbol_token),
+                transaction_type=tx,
+                quantity=qty,
+                product_type="CARRYFORWARD",
+                order_type="MARKET",
+                timeout_sec=float(settings.angel_request_timeout_sec or 15.0),
+                **_angel_order_headers(),
+            )
+            order_id, _ok, broker_msg = angel_orders.extract_place_ack(raw)
+            if not order_id:
+                raise RuntimeError(broker_msg or "Angel placeOrder returned no order id")
+            outcome = angel_orders.await_order_terminal(
+                order_id=order_id,
+                timeout_sec=min(8.0, float(settings.angel_request_timeout_sec or 15.0)),
+                poll_interval_sec=0.1,
+                cancel_if_unfilled=True,
+                **_angel_order_headers(),
+            )
+            if not outcome.filled:
+                raise RuntimeError(f"Broker {outcome.status}: {outcome.message or broker_msg}")
+            exit_px = float(outcome.average_price or 0) or exit_px
+            tr.append_trading_log(
+                db,
+                user_id=user_id,
+                mode=mode,
+                leg=lid,
+                action="LIVE_MANUAL_CLOSE",
+                symbol=pos.trading_symbol,
+                quantity=qty,
+                exit_price=exit_px,
+                order_id=order_id,
+                status="COMPLETE",
+                message=f"Manual close {tx} FILLED @ {exit_px:.2f}"[:900],
+            )
+        except Exception as exc:  # noqa: BLE001
+            tr.append_trading_log(
+                db,
+                user_id=user_id,
+                mode=mode,
+                leg=lid,
+                action="ERROR",
+                symbol=pos.trading_symbol,
+                quantity=qty,
+                message=f"Manual close rejected by broker: {exc}"[:900],
+            )
+            raise ValueError(f"Broker close failed: {exc}") from exc
+
+    pnl = (exit_px - entry) * qty if side == "BUY" else (entry - exit_px) * qty
+    if entry <= 0:
+        pnl = 0.0
+    tr.close_position(db, pos, exit_price=exit_px, exit_reason="MANUAL_CLOSE", pnl=pnl)
+    tr.append_trading_log(
+        db,
+        user_id=user_id,
+        mode=mode,
+        leg=lid,
+        action="MANUAL_CLOSE",
+        symbol=pos.trading_symbol,
+        quantity=qty,
+        entry_price=entry,
+        exit_price=exit_px,
+        pnl=pnl,
+        message=f"Manual close {side} {lots} lot(s) @ {exit_px:.2f}"[:900],
+    )
+
+    # Runtime: realize points-based PnL and finish the day so no phantom TP/SL fires.
+    rt_side = str(runtime.get("side") or "")
+    if int(runtime.get("positionLots") or 0) > 0 and rt_side in ("BUY", "SELL"):
+        rt_entry = _num(runtime.get("entryPrice"))
+        rt_lots = int(runtime.get("positionLots") or 0)
+        delta = (exit_px - rt_entry) * rt_lots if rt_side == "BUY" else (rt_entry - exit_px) * rt_lots
+        runtime["realizedPnl"] = round(_num(runtime.get("realizedPnl")) + delta, 2)
+    runtime.update(
+        {
+            "positionLots": 0,
+            "side": None,
+            "entryPrice": 0.0,
+            "tpPrice": 0.0,
+            "slPrice": 0.0,
+            "phase": "DONE",
+            "message": "Manually closed from dashboard",
+        }
+    )
+    cfg["breakout_runtime"] = runtime
+    tr.save_strategy_settings(db, user_id, config=cfg)
 
 
 def process_user_tick(db, user_id: int) -> None:

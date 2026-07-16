@@ -8,7 +8,7 @@ import { ConfirmModal } from "@/components/trader/ui/confirm-modal";
 import { CardTitle, PageHeader, PremiumCard } from "@/components/trader/ui/primitives";
 import { useStrategy2Dashboard } from "@/hooks/use-strategy2-dashboard";
 import { detectMcxQuotesTokenExpiry } from "@/lib/angel-session";
-import { setAlgoRunning, setTradingMode } from "@/lib/strategy2/api";
+import { closeAllTrades, closeTradeLeg, setAlgoRunning, setTradingMode } from "@/lib/strategy2/api";
 import type { MarketQuote, TradingMode } from "@/lib/strategy2/types";
 import { cn } from "@/components/ui";
 
@@ -93,7 +93,7 @@ function DataTable({
 }: {
   title: string;
   headers: string[];
-  rows: (string | number)[][];
+  rows: (string | number | ReactNode)[][];
   empty: string;
   action?: ReactNode;
 }) {
@@ -152,6 +152,11 @@ export function Strategy2DashboardView() {
   const [busy, setBusy] = useState(false);
   const [clearLogsModal, setClearLogsModal] = useState(false);
   const [clearHistoryModal, setClearHistoryModal] = useState(false);
+  const [closeLeg, setCloseLeg] = useState<string | null>(null);
+  const [closingLeg, setClosingLeg] = useState<string | null>(null);
+  const [closeAllModal, setCloseAllModal] = useState(false);
+  const [closingAll, setClosingAll] = useState(false);
+  const [closeError, setCloseError] = useState<string | null>(null);
 
   const quotes = serverOnline ? (data?.quotes ?? []) : [];
   const activeTrades = serverOnline ? (data?.active_trades ?? []) : [];
@@ -177,6 +182,33 @@ export function Strategy2DashboardView() {
       await refresh();
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function confirmCloseLeg(legId: string) {
+    setClosingLeg(legId);
+    setCloseError(null);
+    try {
+      await closeTradeLeg(legId);
+      await refresh();
+    } catch (err) {
+      setCloseError(err instanceof Error ? err.message : "Failed to close trade");
+    } finally {
+      setClosingLeg(null);
+    }
+  }
+
+  async function confirmCloseAll() {
+    setClosingAll(true);
+    setCloseError(null);
+    try {
+      await closeAllTrades();
+      setAlgoRunningLocal(false);
+      await refresh();
+    } catch (err) {
+      setCloseError(err instanceof Error ? err.message : "Failed to close all trades");
+    } finally {
+      setClosingAll(false);
     }
   }
 
@@ -323,6 +355,17 @@ export function Strategy2DashboardView() {
               <dt className="text-[10px] text-[var(--text-muted)]">Current Market Price</dt>
               <dd className="text-lg font-semibold tabular-nums">{fmtPx(data?.current_market_price ?? 0)}</dd>
             </div>
+            <div>
+              <dt className="text-[10px] text-[var(--text-muted)]">Today&apos;s P&amp;L (₹)</dt>
+              <dd
+                className={cn(
+                  "text-lg font-semibold tabular-nums",
+                  (data?.today_pnl ?? 0) >= 0 ? "text-[var(--success)]" : "text-[var(--danger)]",
+                )}
+              >
+                {fmtPnl(data?.today_pnl ?? 0)}
+              </dd>
+            </div>
             <div className="sm:col-span-2">
               <dt className="text-[10px] text-[var(--text-muted)]">Next Action Level</dt>
               <dd className="text-sm font-medium">{data?.next_action_level ?? "—"}</dd>
@@ -331,9 +374,15 @@ export function Strategy2DashboardView() {
         </PremiumCard>
       </div>
 
+      {closeError ? (
+        <p className="rounded-xl border border-[var(--danger-soft)] bg-[var(--danger-soft)] px-4 py-3 text-sm text-[var(--danger)]">
+          Close trade failed: {closeError}
+        </p>
+      ) : null}
+
       <DataTable
         title="Active Trades"
-        headers={["Trade Time", "Leg", "Lots", "Entry", "Mark", "P&L", "Mode"]}
+        headers={["Trade Time", "Leg", "Lots", "Entry", "Mark", "P&L", "Mode", "Close"]}
         rows={activeTrades.map((t) => [
           fmtDateTime(t.entry_time),
           t.leg_id,
@@ -342,8 +391,27 @@ export function Strategy2DashboardView() {
           fmtPx(t.current_price),
           fmtPnl(t.pnl),
           t.trading_mode,
+          <button
+            key={`close-${t.id}`}
+            type="button"
+            disabled={closingLeg != null}
+            onClick={() => setCloseLeg(t.leg_id)}
+            className="rounded-md border border-[var(--danger)] px-2 py-1 text-[11px] font-medium text-[var(--danger)] hover:bg-[var(--danger-soft)] disabled:opacity-50"
+          >
+            {closingLeg === t.leg_id ? "Closing…" : "Close"}
+          </button>,
         ])}
         empty={serverOnline ? "No open trades" : "Server offline"}
+        action={
+          <button
+            type="button"
+            disabled={activeTrades.length === 0 || closingAll || closingLeg != null}
+            onClick={() => setCloseAllModal(true)}
+            className="rounded-lg border border-[var(--danger)] px-3 py-1 text-[11px] font-semibold text-[var(--danger)] hover:bg-[var(--danger-soft)] disabled:opacity-50"
+          >
+            {closingAll ? "Closing all…" : "Close All Trades"}
+          </button>
+        }
       />
 
       <DataTable
@@ -410,6 +478,41 @@ export function Strategy2DashboardView() {
         onConfirm={() => {
           setClearLogsModal(false);
           void clearLogs();
+        }}
+      />
+
+      <ConfirmModal
+        open={closeLeg != null}
+        title={`Close ${closeLeg ?? ""} trade?`}
+        message={
+          data?.trading_mode === "LIVE"
+            ? `This places a MARKET SELL at the broker for leg ${closeLeg ?? ""} and closes the trade after fill confirmation.`
+            : `This closes the paper trade for leg ${closeLeg ?? ""} at the current market price.`
+        }
+        confirmLabel="Close Trade"
+        danger
+        onCancel={() => setCloseLeg(null)}
+        onConfirm={() => {
+          const leg = closeLeg;
+          setCloseLeg(null);
+          if (leg) void confirmCloseLeg(leg);
+        }}
+      />
+
+      <ConfirmModal
+        open={closeAllModal}
+        title="Close all active trades?"
+        message={
+          data?.trading_mode === "LIVE"
+            ? `Algo will stop first. ${activeTrades.length} active trade(s) will be exited at the broker using MARKET orders; each local trade closes only after broker fill confirmation.`
+            : `Algo will stop and all ${activeTrades.length} paper trade(s) will close at the current market price.`
+        }
+        confirmLabel="Close All Trades"
+        danger
+        onCancel={() => setCloseAllModal(false)}
+        onConfirm={() => {
+          setCloseAllModal(false);
+          void confirmCloseAll();
         }}
       />
 

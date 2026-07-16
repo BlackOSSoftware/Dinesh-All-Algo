@@ -57,8 +57,15 @@ async def lifespan(_: FastAPI):
     seed_admin_if_missing()
     log_startup_config()
     _start_angel_scheduler()
+    from app.services.strategy3_trading_engine import (
+        start_strategy3_engine_task,
+        stop_strategy3_engine_task,
+    )
+
+    start_strategy3_engine_task()
     LOG.info("Strategy 3 backend startup complete")
     yield
+    await stop_strategy3_engine_task()
 
 
 app = FastAPI(title="Strategy 3 API", lifespan=lifespan)

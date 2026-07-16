@@ -304,6 +304,8 @@ export type DashboardSnapshot = {
   position_lots: number;
   realized_pnl: number;
   unrealized_pnl: number;
+  today_realized_pnl?: number;
+  today_pnl?: number;
   current_market_price: number;
   next_action_level?: string | null;
   active_trades: ActiveTrade[];

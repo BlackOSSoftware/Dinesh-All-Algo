@@ -104,6 +104,45 @@ def _sensex_from_quote() -> tuple[float, bool, str, str | None]:
     return float(price), bool(raw.get("market_open")), source, err
 
 
+def _leg_out_from_runtime(side: str, leg: dict[str, Any]) -> WindowLegOut:
+    return WindowLegOut(
+        side=side,
+        strike=float(leg.get("strike") or 0),
+        premium_close=float(leg.get("premiumClose") or 0),
+        entry_pct=leg.get("entryPct"),
+        entry_price=leg.get("entryPrice"),
+        target_price=leg.get("tp"),
+        stop_price=leg.get("sl"),
+        tradable=str(leg.get("state")) in ("ARMED", "OPEN"),
+        skip_reason=str(leg.get("status") or "") or None,
+    )
+
+
+def _build_windows_from_runtime(runtime: dict[str, Any]) -> list[WindowOut] | None:
+    from app.services.strategy3_trading_engine import _session_date
+
+    if str(runtime.get("sessionDate") or "") != _session_date():
+        return None
+    windows = runtime.get("windows")
+    if not isinstance(windows, list) or not windows:
+        return None
+    out: list[WindowOut] = []
+    for w in windows:
+        legs = w.get("legs") if isinstance(w.get("legs"), dict) else {}
+        ce = legs.get("CE") if isinstance(legs.get("CE"), dict) else None
+        pe = legs.get("PE") if isinstance(legs.get("PE"), dict) else None
+        out.append(
+            WindowOut(
+                index=int(w.get("index") or 0),
+                start_hhmm=str(w.get("start") or ""),
+                reference_close=w.get("refClose"),
+                ce=_leg_out_from_runtime("CE", ce) if ce else None,
+                pe=_leg_out_from_runtime("PE", pe) if pe else None,
+            )
+        )
+    return out
+
+
 def _build_windows_preview(cfg: dict[str, Any], reference: float) -> list[WindowOut]:
     windows = build_trade_windows(
         str(cfg.get("startTime") or "14:35"),
@@ -120,7 +159,7 @@ def _build_windows_preview(cfg: dict[str, Any], reference: float) -> list[Window
             WindowOut(
                 index=w.index,
                 start_hhmm=w.start_hhmm,
-                reference_close=reference if reference > 0 else None,
+                reference_close=None,
                 ce=WindowLegOut(side="CE", strike=ce_strike, skip_reason=pending),
                 pe=WindowLegOut(side="PE", strike=pe_strike, skip_reason=pending),
             )
@@ -208,11 +247,23 @@ def get_dashboard(user: User = Depends(get_current_user), db: Session = Depends(
     logs_rows = tr.list_trading_logs(db, user.id, limit=80)
 
     realized = sum(float(p.pnl or 0) for p in completed_rows)
+    today_realized = tr.sum_completed_pnl_today_ist(db, user.id)
+
+    # Mark open option positions at their own option LTP (batched), not the index price.
+    option_ltps: dict[str, float] = {}
+    tokens = [str(p.symbol_token) for p in active_rows if p.symbol_token]
+    if tokens:
+        from app.services.strategy3_trading_engine import fetch_bfo_ltps
+
+        option_ltps = fetch_bfo_ltps(list(dict.fromkeys(tokens)))
+
     unrealized = 0.0
     active_trades: list[ActivePositionOut] = []
     for p in active_rows:
-        mark = sensex_price if sensex_price > 0 else float(p.entry_price or 0)
         entry = float(p.entry_price or 0)
+        mark = float(option_ltps.get(str(p.symbol_token or "")) or 0.0)
+        if mark <= 0:
+            mark = entry
         qty = int(p.quantity or 0)
         pnl = (mark - entry) * qty if entry > 0 else 0.0
         unrealized += pnl
@@ -271,7 +322,8 @@ def get_dashboard(user: User = Depends(get_current_user), db: Session = Depends(
         for lg in logs_rows
     ]
 
-    windows = _build_windows_preview(cfg, sensex_price)
+    runtime = cfg.get("strategy3_runtime") if isinstance(cfg.get("strategy3_runtime"), dict) else {}
+    windows = _build_windows_from_runtime(runtime or {}) or _build_windows_preview(cfg, sensex_price)
 
     return DashboardOut(
         sensex_price=sensex_price,
@@ -285,10 +337,145 @@ def get_dashboard(user: User = Depends(get_current_user), db: Session = Depends(
         windows=windows,
         realized_pnl=round(realized, 2),
         unrealized_pnl=round(unrealized, 2),
+        today_realized_pnl=round(today_realized, 2),
+        today_pnl=round(today_realized + unrealized, 2),
         active_trades=active_trades,
         completed_trades=completed_trades,
         logs=logs,
     )
+
+
+@router.post("/legs/{leg_id}/close")
+def close_leg_manual(
+    leg_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Manual close from dashboard. LIVE places a broker MARKET SELL before closing the row."""
+    from app.config import settings
+    from app.services import angel_orders
+
+    lid = (leg_id or "").strip().upper()
+    pos = tr.get_open_position_by_leg(db, user.id, lid)
+    if not pos:
+        raise HTTPException(status_code=404, detail="No open position for this leg")
+
+    entry = float(pos.entry_price or 0)
+    qty = int(pos.quantity or 0)
+    mode = (pos.trading_mode or "PAPER").upper()
+    # Exit at the option's own LTP; broker fill overrides this for LIVE.
+    exit_px = entry
+    if pos.symbol_token:
+        from app.services.strategy3_trading_engine import fetch_bfo_ltps
+
+        ltp = float(fetch_bfo_ltps([str(pos.symbol_token)]).get(str(pos.symbol_token)) or 0.0)
+        if ltp > 0:
+            exit_px = ltp
+
+    if mode == "LIVE":
+        if not (settings.angel_api_key or "").strip() or not (settings.angel_jwt_token or "").strip():
+            raise HTTPException(status_code=400, detail="Angel One not configured — cannot close LIVE trade at broker")
+        if not pos.trading_symbol or not pos.symbol_token or qty <= 0:
+            raise HTTPException(status_code=400, detail="Position has no broker symbol/token — cannot close at broker")
+        headers = dict(
+            api_key=settings.angel_api_key.strip(),
+            jwt_token=settings.angel_jwt_token.strip(),
+            source_id=(settings.angel_source_id or "WEB").strip(),
+            client_local_ip=(settings.angel_client_local_ip or "127.0.0.1").strip(),
+            client_public_ip=(settings.angel_client_public_ip or "127.0.0.1").strip(),
+            mac_address=(settings.angel_mac_address or "00:00:00:00:00:00").strip(),
+            user_type=(settings.angel_user_type or "USER").strip(),
+        )
+        try:
+            raw = angel_orders.place_market_order(
+                exchange=(pos.exchange or "BFO").upper(),
+                tradingsymbol=pos.trading_symbol,
+                symboltoken=str(pos.symbol_token),
+                transaction_type="SELL",
+                quantity=qty,
+                product_type=(settings.angel_option_product_type or "CARRYFORWARD").upper(),
+                timeout_sec=float(settings.angel_request_timeout_sec or 15.0),
+                **headers,
+            )
+            order_id, _ok, broker_msg = angel_orders.extract_place_ack(raw)
+            if not order_id:
+                raise RuntimeError(broker_msg or "Angel placeOrder returned no order id")
+            outcome = angel_orders.await_order_terminal(
+                order_id=order_id,
+                timeout_sec=min(8.0, float(settings.angel_request_timeout_sec or 15.0)),
+                poll_interval_sec=0.1,
+                cancel_if_unfilled=True,
+                **headers,
+            )
+            if not outcome.filled:
+                raise RuntimeError(f"Broker {outcome.status}: {outcome.message or broker_msg}")
+            if float(outcome.average_price or 0) > 0:
+                exit_px = float(outcome.average_price)
+            tr.append_trading_log(
+                db,
+                user_id=user.id,
+                mode=mode,
+                leg=lid,
+                action="LIVE_MANUAL_CLOSE",
+                symbol=pos.trading_symbol,
+                quantity=qty,
+                exit_price=exit_px,
+                status="COMPLETE",
+                message=f"Manual close SELL FILLED @ {exit_px:.2f}"[:900],
+            )
+        except (RuntimeError, ValueError) as exc:
+            tr.append_trading_log(
+                db,
+                user_id=user.id,
+                mode=mode,
+                leg=lid,
+                action="ERROR",
+                symbol=pos.trading_symbol,
+                quantity=qty,
+                message=f"Manual close rejected by broker: {exc}"[:900],
+            )
+            raise HTTPException(status_code=502, detail=f"Broker close failed: {exc}") from exc
+
+    pnl = (exit_px - entry) * qty if entry > 0 else 0.0
+    tr.close_position(db, pos, exit_price=exit_px, exit_reason="MANUAL_CLOSE", pnl=pnl)
+    tr.append_trading_log(
+        db,
+        user_id=user.id,
+        mode=mode,
+        leg=lid,
+        action="MANUAL_CLOSE",
+        symbol=pos.trading_symbol,
+        quantity=qty,
+        entry_price=entry,
+        exit_price=exit_px,
+        pnl=pnl,
+        message=f"Manual close @ {exit_px:.2f}"[:900],
+    )
+    return {"ok": True}
+
+
+@router.post("/positions/close-all")
+def close_all_positions(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    positions = tr.list_open_positions(db, user.id)
+    if not positions:
+        raise HTTPException(status_code=404, detail="No active trades to close")
+
+    # Prevent any strategy worker from opening another trade during bulk exit.
+    tr.save_strategy_settings(db, user.id, algo_running=False)
+    closed = 0
+    for pos in positions:
+        try:
+            close_leg_manual(pos.leg_id, user, db)
+            closed += 1
+        except HTTPException as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Closed {closed} of {len(positions)} trades. {pos.leg_id} failed: {exc.detail}",
+            ) from exc
+    return {"ok": True, "closed": closed}
 
 
 @router.delete("/logs")

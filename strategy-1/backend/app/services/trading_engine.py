@@ -88,8 +88,31 @@ def manual_close_leg(db: Session, user_id: int, leg_id: str) -> None:
         raise ValueError("NO_OPEN_POSITION")
     ltp, _, ok = get_index_ltp_cached()
     idx = float(ltp) if ok and ltp is not None else float(pos.underlying_at_entry or pos.range_level)
-    mark = _synthetic_option_mark(pos, idx)
-    _close_open(db, pos, "MANUAL_CLOSE", mark)
+    # _close_sob places the broker MARKET SELL in LIVE mode and waits for fill
+    # confirmation before closing the DB row (paper closes at synthetic mark).
+    from app.services.sensex_option_buy import _close_sob
+
+    if not _close_sob(db, pos, "MANUAL_CLOSE", idx):
+        raise ValueError("Broker close failed — exit SELL was rejected or not filled. Check logs.")
+
+    # Wipe open-cycle runtime so the engine does not keep phantom TP/SL/trailing state.
+    tr.merge_strategy_runtime(
+        db,
+        user_id,
+        {
+            "flat_mode": None,
+            "trail_extreme": None,
+            "core_lots": 0,
+            "avg_lots": 0,
+            "sl_level": None,
+            "t1_level_avg": None,
+            "t1_level_core": None,
+            "avg_t1_done": None,
+            "core_t1_done": None,
+            "cycle_extreme": None,
+            "entries_filled": None,
+        },
+    )
 
 
 def _tick_session(db: Session, st_row: StrategySettings, cfg: dict[str, Any], index_ltp: float) -> None:

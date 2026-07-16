@@ -65,6 +65,14 @@ export async function clearTradingLogs() {
   return apiFetch("/trading/logs", { method: "DELETE" });
 }
 
+export async function closeTradeLeg(legId: string) {
+  return apiFetch(`/trading/legs/${encodeURIComponent(legId)}/close`, { method: "POST" });
+}
+
+export async function closeAllTrades() {
+  return apiFetch("/trading/positions/close-all", { method: "POST" });
+}
+
 export async function clearCompletedTrades() {
   return apiFetch("/trading/positions/completed", { method: "DELETE" });
 }

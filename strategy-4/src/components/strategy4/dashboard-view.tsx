@@ -8,7 +8,7 @@ import { ConfirmModal } from "@/components/trader/ui/confirm-modal";
 import { CardTitle, PageHeader, PremiumCard } from "@/components/trader/ui/primitives";
 import { useStrategy4Dashboard } from "@/hooks/use-strategy4-dashboard";
 import { detectMcxQuotesTokenExpiry } from "@/lib/angel-session";
-import { setAlgoRunning, setTradingMode } from "@/lib/strategy4/api";
+import { closeAllTrades, closeTradeLeg, setAlgoRunning, setTradingMode } from "@/lib/strategy4/api";
 import type { DashboardSnapshot, MarketQuote, TradingMode } from "@/lib/strategy4/types";
 import { cn } from "@/components/ui";
 
@@ -106,7 +106,7 @@ function DataTable({
 }: {
   title: string;
   headers: string[];
-  rows: (string | number)[][];
+  rows: (string | number | ReactNode)[][];
   empty: string;
   action?: ReactNode;
 }) {
@@ -214,6 +214,17 @@ function StatusCard({
             {fmtPnl(data?.realized_pnl)} · {data?.trade_count ?? 0}
           </dd>
         </div>
+        <div>
+          <dt className="text-[10px] uppercase text-[var(--text-muted)]">Today&apos;s P&amp;L (₹)</dt>
+          <dd
+            className={cn(
+              "text-sm font-semibold tabular-nums",
+              (data?.today_pnl ?? 0) >= 0 ? "text-[var(--success)]" : "text-[var(--danger)]",
+            )}
+          >
+            {fmtPnl(data?.today_pnl ?? 0)}
+          </dd>
+        </div>
       </dl>
 
       {(phase || "").toUpperCase() === "IN_TRADE" || (phase || "").toUpperCase() === "REVERSE_TRADE" ? (
@@ -234,6 +245,11 @@ export function Strategy4DashboardView() {
   const [busy, setBusy] = useState(false);
   const [clearLogsModal, setClearLogsModal] = useState(false);
   const [clearHistoryModal, setClearHistoryModal] = useState(false);
+  const [closeLeg, setCloseLeg] = useState<string | null>(null);
+  const [closingLeg, setClosingLeg] = useState<string | null>(null);
+  const [closeAllModal, setCloseAllModal] = useState(false);
+  const [closingAll, setClosingAll] = useState(false);
+  const [closeError, setCloseError] = useState<string | null>(null);
 
   const quotes = serverOnline ? (data?.quotes ?? []) : [];
   const activeTrades = serverOnline ? (data?.active_trades ?? []) : [];
@@ -252,14 +268,44 @@ export function Strategy4DashboardView() {
       const tb = new Date(b.exit_time || b.entry_time || 0).getTime();
       return ta - tb;
     });
+    // Running total restarts each IST calendar day so "Day P&L" never carries across days.
     const map = new Map<number, number>();
-    let running = 0;
+    const runningByDay = new Map<string, number>();
     for (const t of sorted) {
-      running += Number(t.pnl || 0);
-      map.set(t.id, running);
+      const day = fmtDate(t.exit_time || t.entry_time);
+      const next = (runningByDay.get(day) ?? 0) + Number(t.pnl || 0);
+      runningByDay.set(day, next);
+      map.set(t.id, next);
     }
     return map;
   }, [completedTrades]);
+
+  async function confirmCloseLeg(legId: string) {
+    setClosingLeg(legId);
+    setCloseError(null);
+    try {
+      await closeTradeLeg(legId);
+      await refresh();
+    } catch (err) {
+      setCloseError(err instanceof Error ? err.message : "Failed to close trade");
+    } finally {
+      setClosingLeg(null);
+    }
+  }
+
+  async function confirmCloseAll() {
+    setClosingAll(true);
+    setCloseError(null);
+    try {
+      await closeAllTrades();
+      setAlgoRunningLocal(false);
+      await refresh();
+    } catch (err) {
+      setCloseError(err instanceof Error ? err.message : "Failed to close all trades");
+    } finally {
+      setClosingAll(false);
+    }
+  }
 
   async function toggleAlgo(enable: boolean) {
     setBusy(true);
@@ -349,9 +395,15 @@ export function Strategy4DashboardView() {
 
       <StatusCard data={data} quote={activeQuote} />
 
+      {closeError ? (
+        <p className="rounded-xl border border-[var(--danger-soft)] bg-[var(--danger-soft)] px-4 py-3 text-sm text-[var(--danger)]">
+          Close trade failed: {closeError}
+        </p>
+      ) : null}
+
       <DataTable
         title="Active Trades"
-        headers={["Time", "Side", "Leg", "Lots", "Entry", "Mark", "P&L", "Mode"]}
+        headers={["Time", "Side", "Leg", "Lots", "Entry", "Mark", "P&L", "Mode", "Close"]}
         rows={activeTrades.map((t) => [
           fmtDateTime(t.entry_time),
           t.side || "—",
@@ -361,8 +413,27 @@ export function Strategy4DashboardView() {
           fmtPx(t.current_price),
           fmtPnl(t.pnl),
           t.trading_mode,
+          <button
+            key={`close-${t.id}`}
+            type="button"
+            disabled={closingLeg != null}
+            onClick={() => setCloseLeg(t.leg_id)}
+            className="rounded-md border border-[var(--danger)] px-2 py-1 text-[11px] font-medium text-[var(--danger)] hover:bg-[var(--danger-soft)] disabled:opacity-50"
+          >
+            {closingLeg === t.leg_id ? "Closing…" : "Close"}
+          </button>,
         ])}
         empty={serverOnline ? "No open trades" : "Server offline"}
+        action={
+          <button
+            type="button"
+            disabled={activeTrades.length === 0 || closingAll || closingLeg != null}
+            onClick={() => setCloseAllModal(true)}
+            className="rounded-lg border border-[var(--danger)] px-3 py-1 text-[11px] font-semibold text-[var(--danger)] hover:bg-[var(--danger-soft)] disabled:opacity-50"
+          >
+            {closingAll ? "Closing all…" : "Close All Trades"}
+          </button>
+        }
       />
 
       <DataTable
@@ -450,6 +521,41 @@ export function Strategy4DashboardView() {
         onConfirm={() => {
           setClearLogsModal(false);
           void clearLogs();
+        }}
+      />
+
+      <ConfirmModal
+        open={closeLeg != null}
+        title={`Close ${tradeLabel(closeLeg ?? "")} trade?`}
+        message={
+          data?.trading_mode === "LIVE"
+            ? "This places the opposite MARKET order at the broker and closes the trade after fill confirmation."
+            : "This closes the paper trade at the current market price."
+        }
+        confirmLabel="Close Trade"
+        danger
+        onCancel={() => setCloseLeg(null)}
+        onConfirm={() => {
+          const leg = closeLeg;
+          setCloseLeg(null);
+          if (leg) void confirmCloseLeg(leg);
+        }}
+      />
+
+      <ConfirmModal
+        open={closeAllModal}
+        title="Close all active trades?"
+        message={
+          data?.trading_mode === "LIVE"
+            ? `Algo will stop first. ${activeTrades.length} active trade(s) will be exited at the broker using opposite MARKET orders; each local trade closes only after broker fill confirmation.`
+            : `Algo will stop and all ${activeTrades.length} paper trade(s) will close at the current market price.`
+        }
+        confirmLabel="Close All Trades"
+        danger
+        onCancel={() => setCloseAllModal(false)}
+        onConfirm={() => {
+          setCloseAllModal(false);
+          void confirmCloseAll();
         }}
       />
 
