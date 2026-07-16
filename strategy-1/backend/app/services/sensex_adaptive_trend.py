@@ -824,10 +824,6 @@ def tick_sensex_adaptive_trend_session(
         _persist_runtime(db, uid, runtime)
         return
 
-    if prev is None and pos is None:
-        _persist_runtime(db, uid, runtime)
-        return
-
     if tr.leg_has_session_blocking_exit_today_ist(db, uid, LEG_SOB) and pos is None:
         _persist_runtime(db, uid, runtime)
         return
@@ -841,7 +837,7 @@ def tick_sensex_adaptive_trend_session(
         high=index_ltp,
         low=index_ltp,
         close=index_ltp,
-        prev_close=prev,
+        prev_close=float(prev) if prev is not None else float(base),
     )
     state, signals = process_bar(state, p, bar, session_end=session_end)
 

@@ -166,7 +166,7 @@ async def run_engine_loop() -> None:
         except Exception:  # noqa: BLE001
             LOG.exception("tick_once crashed")
         try:
-            await asyncio.wait_for(asyncio.sleep(0.25), timeout=1.0)
+            await asyncio.wait_for(asyncio.sleep(0.02), timeout=1.0)
         except asyncio.CancelledError:
             break
     LOG.info("Trading engine loop stopped")
