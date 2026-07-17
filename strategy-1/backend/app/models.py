@@ -51,6 +51,7 @@ class TradePosition(Base):
     call_sl_pts: Mapped[int] = mapped_column(Integer, nullable=True)
     sl_mode: Mapped[str] = mapped_column(String(16), nullable=False, default="auto")
     underlying_at_entry: Mapped[float] = mapped_column(Float, nullable=True)
+    underlying_at_exit: Mapped[float] = mapped_column(Float, nullable=True)
     entry_price: Mapped[float] = mapped_column(Float, nullable=False)
     entry_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     exit_price: Mapped[float] = mapped_column(Float, nullable=True)

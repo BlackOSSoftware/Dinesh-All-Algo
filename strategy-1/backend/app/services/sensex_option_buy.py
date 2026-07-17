@@ -430,7 +430,14 @@ def _close_sob(db: Session, pos: TradePosition, reason: str, index_ltp: float) -
         mark = 0.0
     else:
         pnl = (mark - entry) * qty
-    tr.close_position(db, pos, exit_price=mark, exit_reason=reason[:64], pnl=pnl)
+    tr.close_position(
+        db,
+        pos,
+        exit_price=mark,
+        exit_reason=reason[:64],
+        pnl=pnl,
+        underlying_at_exit=float(index_ltp),
+    )
     tr.append_trading_log(
         db,
         user_id=pos.user_id,
@@ -445,7 +452,7 @@ def _close_sob(db: Session, pos: TradePosition, reason: str, index_ltp: float) -
         pnl=pnl,
         status=reason[:32],
         order_id=pos.order_id,
-        message=reason[:900],
+        message=f"{reason} · SENSEX {float(index_ltp):,.2f}"[:900],
     )
     return True
 

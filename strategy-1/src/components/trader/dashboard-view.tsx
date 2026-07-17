@@ -37,7 +37,6 @@ const COMPLETED_COLS = [
   "Leg",
   "Side",
   "Symbol",
-  "Index Entry",
   "Entry Price",
   "Exit Price",
   "Lots",
@@ -457,10 +456,17 @@ export function DashboardView() {
                       {c.symbol ?? "—"}
                     </td>
                     <td className="px-3 py-2 font-mono font-semibold tabular-nums">
-                      {c.strike != null ? fmtLevel(c.strike) : c.range_level != null ? fmtLevel(c.range_level) : "—"}
+                      {c.index_entry != null
+                        ? fmtLevel(c.index_entry)
+                        : c.strike != null
+                          ? fmtLevel(c.strike)
+                          : c.range_level != null
+                            ? fmtLevel(c.range_level)
+                            : "—"}
                     </td>
-                    <td className="px-3 py-2 font-mono tabular-nums">{c.entry_price != null ? d.fmtInr(c.entry_price) : "—"}</td>
-                    <td className="px-3 py-2 font-mono tabular-nums">{c.exit_price != null ? d.fmtInr(c.exit_price) : "—"}</td>
+                    <td className="px-3 py-2 font-mono font-semibold tabular-nums">
+                      {c.index_exit != null ? fmtLevel(c.index_exit) : "—"}
+                    </td>
                     <td className="px-3 py-2 font-mono tabular-nums">{c.lots ?? "—"}</td>
                     <td
                       className={cn(

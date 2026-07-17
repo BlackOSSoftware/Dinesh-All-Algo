@@ -122,7 +122,7 @@ def _tick_session(db: Session, st_row: StrategySettings, cfg: dict[str, Any], in
 
 def tick_once() -> None:
     global _prev_index_ltp, _last_market_ok, _logged_engine_start
-    ltp, detail, ok = get_index_ltp_cached()
+    ltp, _detail, ok = get_index_ltp_cached()
     db = SessionLocal()
     try:
         rows = list(db.scalars(select(StrategySettings).where(StrategySettings.algo_running.is_(True))).all())
@@ -130,30 +130,9 @@ def tick_once() -> None:
             LOG.info("Trading engine serving %d active strategy row(s)", len(rows))
             _logged_engine_start = True
 
-        good = bool(ok and ltp is not None)
-        if good:
-            if _last_market_ok is not True:
-                for st in rows:
-                    tr.append_trading_log(
-                        db,
-                        user_id=st.user_id,
-                        mode=st.trading_mode,
-                        leg="-",
-                        action="MARKET_DATA_CONNECTED",
-                        message="Index quote OK",
-                    )
-        else:
-            if _last_market_ok is True:
-                for st in rows:
-                    tr.append_trading_log(
-                        db,
-                        user_id=st.user_id,
-                        mode=st.trading_mode,
-                        leg="-",
-                        action="MARKET_DATA_LOST",
-                        message=detail or "No LTP",
-                    )
-        _last_market_ok = good
+        # Market-data connect/lost transitions are tracked internally only
+        # (no MARKET_DATA_CONNECTED / MARKET_DATA_LOST rows in trading logs).
+        _last_market_ok = bool(ok and ltp is not None)
 
         if ltp is None or not ok:
             return

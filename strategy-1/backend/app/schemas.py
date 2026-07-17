@@ -95,6 +95,8 @@ class CompletedPositionOut(BaseModel):
     strike: float | None = None
     tp: float | None = None
     symbol: str | None = None
+    index_entry: float | None = None
+    index_exit: float | None = None
     entry_price: float | None = None
     exit_price: float | None = None
     pnl: float | None = None

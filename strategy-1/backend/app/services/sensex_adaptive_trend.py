@@ -216,7 +216,7 @@ def _place_buy(
             entry_price=fill_px,
             order_id=oid,
             status="COMPLETE",
-            message=f"SENSEX {su} FILLED @ {fill_px:g} · index≈{first_entry_index:g} cycle_base={cycle_base:g}",
+            message=f"SENSEX {su} FILLED @ {fill_px:g} · SENSEX {float(index_ltp):,.2f} · trigger {first_entry_index:g} · cycle_base={cycle_base:g}",
         )
         return True
 
@@ -254,7 +254,7 @@ def _place_buy(
         quantity=qty,
         entry_price=syn_entry,
         status="FILLED",
-        message=f"SENSEX {su} · trigger {first_entry_index:g} · strike {round(option_strike):g} {opt_side} · T1 {t1_index:g}",
+        message=f"SENSEX {su} · SENSEX {float(index_ltp):,.2f} · trigger {first_entry_index:g} · strike {round(option_strike):g} {opt_side} · T1 {t1_index:g}",
     )
     return True
 
@@ -370,7 +370,7 @@ def _place_add_lot(
             entry_price=avg,
             order_id=oid,
             status="COMPLETE",
-            message=f"SENSEX averaging add FILLED; total lots={new_lots}",
+            message=f"SENSEX averaging add FILLED @ index {float(index_ltp):,.2f}; total lots={new_lots}",
         )
         return True
 
@@ -504,7 +504,7 @@ def _partial_exit_lots(
         entry_price=entry,
         exit_price=mark,
         pnl=pnl_part,
-        message=f"T1 partial closed {close_lots} lot(s); remaining {rem_lots}",
+        message=f"T1 partial closed {close_lots} lot(s); remaining {rem_lots} · SENSEX {float(index_ltp):,.2f}",
     )
     return True
 

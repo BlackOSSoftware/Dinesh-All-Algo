@@ -95,6 +95,8 @@ type ApiCompletedRow = {
   strike: number | null;
   tp: number | null;
   symbol: string | null;
+  index_entry: number | null;
+  index_exit: number | null;
   entry_price: number | null;
   exit_price: number | null;
   pnl: number | null;

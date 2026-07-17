@@ -259,11 +259,14 @@ def close_position(
     exit_price: float,
     exit_reason: str,
     pnl: float,
+    underlying_at_exit: float | None = None,
 ) -> TradePosition:
     pos.exit_price = exit_price
     pos.exit_time = _utcnow()
     pos.exit_reason = exit_reason[:64]
     pos.pnl = pnl
+    if underlying_at_exit is not None:
+        pos.underlying_at_exit = float(underlying_at_exit)
     pos.status = "CLOSED"
     db.add(pos)
     db.commit()

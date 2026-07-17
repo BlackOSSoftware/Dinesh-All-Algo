@@ -26,6 +26,23 @@ LOG = logging.getLogger(__name__)
 def ensure_schema():
     """Create tables if missing (useful when init SQL was skipped)."""
     Base.metadata.create_all(bind=engine)
+    _ensure_trade_positions_columns()
+
+
+def _ensure_trade_positions_columns():
+    """Lightweight migration: add columns introduced after the table was created."""
+    with engine.connect() as conn:
+        if engine.dialect.name == "sqlite":
+            cols = {row[1] for row in conn.execute(text("PRAGMA table_info(trade_positions)"))}
+            if cols and "underlying_at_exit" not in cols:
+                conn.execute(text("ALTER TABLE trade_positions ADD COLUMN underlying_at_exit FLOAT"))
+                conn.commit()
+            return
+        try:
+            conn.execute(text("ALTER TABLE trade_positions ADD COLUMN underlying_at_exit FLOAT NULL"))
+            conn.commit()
+        except Exception:  # noqa: BLE001 — column already exists
+            pass
 
 
 def seed_admin_if_missing():

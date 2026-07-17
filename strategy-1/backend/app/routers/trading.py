@@ -171,6 +171,9 @@ def list_logs(
     rows = tr.list_trading_logs(db, user.id, limit=limit)
     out: list[TradingLogOut] = []
     for r in rows:
+        # Market-data connectivity events are not shown in the dashboard logs.
+        if (r.action or "").upper() in ("MARKET_DATA_CONNECTED", "MARKET_DATA_LOST"):
+            continue
         out.append(
             TradingLogOut(
                 id=r.id,
@@ -226,7 +229,11 @@ def list_active_positions(user: User = Depends(get_current_user), db: Session = 
                 trading_mode=p.trading_mode,
                 entry_time=_iso(p.entry_time),
                 symbol=p.trading_symbol,
-                index_entry=float(p.strike) if p.strike else None,
+                index_entry=(
+                    float(p.underlying_at_entry)
+                    if p.underlying_at_entry
+                    else (float(p.strike) if p.strike else None)
+                ),
                 tp1_level=tp1,
                 tp2_trail_level=tp2_trail,
                 sl_level=sl_level,
@@ -236,6 +243,20 @@ def list_active_positions(user: User = Depends(get_current_user), db: Session = 
             )
         )
     return out
+
+
+def _index_exit_for_row(r: Any) -> float | None:
+    """SENSEX level at exit; derived for legacy PAPER rows closed before it was stored."""
+    if r.underlying_at_exit:
+        return float(r.underlying_at_exit)
+    if (r.trading_mode or "").upper() != "PAPER":
+        return None
+    u0 = r.underlying_at_entry
+    if not u0 or not r.entry_price or r.exit_price is None:
+        return None
+    # Invert the synthetic option mark: mark = entry + (index - index_entry) * mult
+    mult = -0.35 if (r.side or "").upper() == "PUT" else 0.35
+    return round(float(u0) + (float(r.exit_price) - float(r.entry_price)) / mult, 2)
 
 
 @router.get("/positions/completed", response_model=list[CompletedPositionOut])
@@ -256,6 +277,12 @@ def list_completed_positions(
             strike=r.strike,
             tp=r.tp,
             symbol=r.trading_symbol,
+            index_entry=(
+                float(r.underlying_at_entry)
+                if r.underlying_at_entry
+                else (float(r.strike) if r.strike else None)
+            ),
+            index_exit=_index_exit_for_row(r),
             entry_price=r.entry_price,
             exit_price=r.exit_price,
             pnl=r.pnl,
