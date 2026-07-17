@@ -265,8 +265,25 @@ def delete_all_trading_logs(db: Session, user_id: int) -> int:
     return int(res.rowcount or 0)
 
 
+def has_open_grid_session(db: Session, user_id: int) -> bool:
+    """True when the grid is live: lots in runtime or open positions in DB."""
+    cfg = load_config_dict(db, user_id)
+    rt = cfg.get("grid_runtime")
+    if isinstance(rt, dict):
+        try:
+            if int(rt.get("positionLots") or 0) > 0 or bool(rt.get("baseEntered")):
+                return True
+        except (TypeError, ValueError):
+            pass
+    return bool(list_open_positions(db, user_id))
+
+
 def reset_algo_session(db: Session, user_id: int, *, current_price: float = 0.0) -> dict[str, Any]:
-    """Fresh grid session when algo is enabled: clear runtime state and close open DB positions."""
+    """Fresh grid session when algo is enabled while flat: clear runtime state.
+
+    Open grids are never reset here — enabling the algo with an open grid resumes it
+    (active trades stay open and the ladder continues from the persisted runtime).
+    """
     from app.services.grid_logic import fresh_grid_runtime, _num
 
     cfg = load_config_dict(db, user_id)
@@ -277,6 +294,8 @@ def reset_algo_session(db: Session, user_id: int, *, current_price: float = 0.0)
     cfg["grid_runtime"] = runtime
     save_strategy_settings(db, user_id, config=cfg)
 
+    # Stale rows with no runtime lots (defensive): mark them closed so the fresh
+    # session starts clean. With an open grid this function is not called.
     mark = current_price
     for pos in list_open_positions(db, user_id):
         px = mark if mark > 0 else float(pos.entry_price or 0)

@@ -117,8 +117,71 @@ def test_u2_exit_after_base_unwind_when_u1_still_sold():
 def test_inventory_floor_after_full_upper_ladder():
     rt, actions = _run_path([302.0, 304.0, 306.0])
     assert rt["positionLots"] == 4
-    assert rt["inventoryFloorLots"] == 4
-    assert not any(a["action"] == "EXIT" and a["positionAfter"] == 0 for a in actions)
+    # Exit side extends until every lot can exit — absolute floor is 0.
+    assert rt["inventoryFloorLots"] == 0
+
+
+def test_exit_ladder_extends_until_lots_zero():
+    """10 lots / 2 per grid: exits continue past the configured 3 levels (U4, U5) to 0 lots."""
+    rt, actions = _run_path([302.0, 304.0, 306.0, 308.0, 310.0])
+    pairs = [(a["action"], a["level"]) for a in actions]
+    assert ("EXIT", "U4") in pairs
+    assert ("EXIT", "U5") in pairs
+    assert rt["positionLots"] == 0
+
+
+def test_zero_lots_grid_stays_active_and_reenters_on_two_point_reversal():
+    """After all lots exit at U5=290, a move down to U4=288 buys back 2 lots."""
+    cfg = _cfg(280)
+    rt = default_runtime()
+    rt, _ = bootstrap_initial_entry({**cfg, "grid_runtime": rt}, rt, fill_price=280)
+    rt, _ = process_price_tick({**cfg, "grid_runtime": rt}, rt, 290.0)
+    assert rt["positionLots"] == 0
+    assert rt["baseEntered"] is True
+
+    rt, acts = process_price_tick({**cfg, "grid_runtime": rt}, rt, 288.0)
+    reentries = [a for a in acts if a["action"] == "REENTER"]
+    assert len(reentries) == 1
+    assert reentries[0]["level"] == "U4"
+    assert reentries[0]["reenterU"] == "U5"
+    assert reentries[0]["lotsDelta"] == 2
+    assert rt["positionLots"] == 2
+
+
+def test_overnight_gap_up_exits_remaining_lots():
+    """Ref 280 · gap 2 · 10 lots · 2/grid: close @287 leaves 4 lots; next open @290 exits all."""
+    cfg = _cfg(280)
+    rt = default_runtime()
+    rt, _ = bootstrap_initial_entry({**cfg, "grid_runtime": rt}, rt, fill_price=280)
+    rt, _ = process_price_tick({**cfg, "grid_runtime": rt}, rt, 287.0)
+    assert rt["positionLots"] == 4  # U1@282, U2@284, U3@286 sold 6
+    # Next day gap open at 290 — traversal crosses 288 (U4) and 290 (U5).
+    rt, acts = process_price_tick({**cfg, "grid_runtime": rt}, rt, 290.0)
+    pairs = [(a["action"], a["level"]) for a in acts]
+    assert ("EXIT", "U4") in pairs
+    assert ("EXIT", "U5") in pairs
+    assert rt["positionLots"] == 0
+
+
+def test_gap_up_partial_exits_two_lots_at_288():
+    cfg = _cfg(280)
+    rt = default_runtime()
+    rt, _ = bootstrap_initial_entry({**cfg, "grid_runtime": rt}, rt, fill_price=280)
+    rt, _ = process_price_tick({**cfg, "grid_runtime": rt}, rt, 287.0)
+    rt, acts = process_price_tick({**cfg, "grid_runtime": rt}, rt, 288.0)
+    exits = [a for a in acts if a["action"] == "EXIT"]
+    assert len(exits) == 1
+    assert exits[0]["level"] == "U4"
+    assert exits[0]["lotsDelta"] == -2
+    assert rt["positionLots"] == 2
+
+
+def test_adds_capped_at_configured_levels_below():
+    """Down side never adds beyond gridLevelsBelow (3): no D4 add on deep fall."""
+    rt, actions = _run_path([292.0])  # ref 300, gap 2 → crosses D1..D3 and beyond
+    adds = [a for a in actions if a["action"] == "ADD"]
+    assert [a["level"] for a in adds] == ["D1", "D2", "D3"]
+    assert rt["positionLots"] == 16  # 10 + 3×2
 
 
 def test_no_position_below_floor_after_base_unwind_reset_cycle():

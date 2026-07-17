@@ -109,18 +109,37 @@ def config_with_invert_for_date(cfg: dict[str, Any], as_of: date | datetime | st
     return {**cfg, "invertGrid": resolve_invert_grid(cfg, as_of=as_of)}
 
 
+def _exit_side_levels_needed(initial_lots: int, lots_per_grid: int) -> int:
+    """Exit-side grid levels required for the full inventory to reach zero lots."""
+    if initial_lots <= 0 or lots_per_grid <= 0:
+        return 0
+    return -(-initial_lots // lots_per_grid)  # ceil division
+
+
 def parse_strategy_config(cfg: dict[str, Any], *, as_of: date | datetime | str | None = None) -> dict[str, Any]:
     invert_grid = resolve_invert_grid(cfg, as_of=as_of)
+    initial_lots = _int(cfg.get("initialLots"))
+    lots_per_grid = max(0, _int(cfg.get("lotsPerGrid")))
+    levels_above = max(0, _int(cfg.get("gridLevelsAbove")))
+    levels_below = max(0, _int(cfg.get("gridLevelsBelow")))
+    # Exit side keeps extending beyond the configured level count until every lot
+    # can exit (grid switches off only at 0 lots). The add side stays capped at
+    # the configured setting (no adds beyond gridLevelsBelow / gridLevelsAbove).
+    exit_levels = _exit_side_levels_needed(initial_lots, lots_per_grid)
+    if invert_grid:
+        levels_below = max(levels_below, exit_levels)
+    else:
+        levels_above = max(levels_above, exit_levels)
     return {
         "start_time": str(cfg.get("startTime") or "09:00"),
         "end_time": str(cfg.get("endTime") or "23:30"),
         "market": str(cfg.get("market") or "CRUDE_OIL").upper(),
         "reference_price": _num(cfg.get("referencePrice")),
-        "initial_lots": _int(cfg.get("initialLots")),
+        "initial_lots": initial_lots,
         "grid_gap": _num(cfg.get("gridGap")),
-        "grid_levels_above": max(0, _int(cfg.get("gridLevelsAbove"))),
-        "grid_levels_below": max(0, _int(cfg.get("gridLevelsBelow"))),
-        "lots_per_grid": max(0, _int(cfg.get("lotsPerGrid"))),
+        "grid_levels_above": levels_above,
+        "grid_levels_below": levels_below,
+        "lots_per_grid": lots_per_grid,
         "invert_grid": invert_grid,
     }
 
@@ -251,19 +270,32 @@ def _count_sold_upper(level_states: dict[str, str], max_upper: int) -> int:
     return sum(1 for i in range(1, max_upper + 1) if _level_phase(level_states, f"U{i}") == "sold")
 
 
-def _absolute_inventory_floor(initial_lots: int, max_upper: int, lots_per_grid: int) -> int:
-    """Lowest position allowed after all upper grid levels have sold (e.g. 10 − 3×2 = 4)."""
-    return max(0, initial_lots - max_upper * lots_per_grid)
+def _count_sold_lower(level_states: dict[str, str], max_lower: int) -> int:
+    return sum(1 for i in range(1, max_lower + 1) if _level_phase(level_states, f"D{i}") == "sold")
+
+
+def _absolute_inventory_floor(initial_lots: int, exit_side_levels: int, lots_per_grid: int) -> int:
+    """Lowest position allowed after all exit-side grid levels have sold.
+
+    Exit side extends until every lot can leave, so this is normally 0
+    (grid switches off only when lots reach zero).
+    """
+    return max(0, initial_lots - exit_side_levels * lots_per_grid)
 
 
 def _protected_inventory_floor(
     initial_lots: int,
     level_states: dict[str, str],
-    max_upper: int,
+    exit_side_levels: int,
     lots_per_grid: int,
+    *,
+    invert_grid: bool = False,
 ) -> int:
-    """Position that must be preserved while current upper legs remain sold (before D adds)."""
-    sold = _count_sold_upper(level_states, max_upper)
+    """Position that must be preserved while current exit-side legs remain sold (before adds)."""
+    if invert_grid:
+        sold = _count_sold_lower(level_states, exit_side_levels)
+    else:
+        sold = _count_sold_upper(level_states, exit_side_levels)
     return max(0, initial_lots - sold * lots_per_grid)
 
 
@@ -773,6 +805,7 @@ def compute_next_action_level(
 
     state_map: dict[str, str] = dict(runtime.get("levelStates") or {})
     arm_map: dict[str, bool] = dict(runtime.get("upperArmLocks") or {})
+    max_upper = max((_upper_idx(l.level_id) for l in levels if l.kind == "upper"), default=0)
 
     if invert_grid:
         for level in levels:
@@ -788,7 +821,7 @@ def compute_next_action_level(
                 higher = f"U{_upper_idx(level.level_id) + 1}"
                 if _level_phase(state_map, higher) == "added" or any(
                     _level_phase(state_map, f"U{n}") == "added"
-                    for n in range(_upper_idx(level.level_id) + 1, 4)
+                    for n in range(_upper_idx(level.level_id) + 1, max_upper + 1)
                 ):
                     continue
                 return higher
@@ -808,7 +841,7 @@ def compute_next_action_level(
             higher = f"U{_upper_idx(level.level_id) + 1}"
             if _level_phase(state_map, higher) == "sold" or any(
                 _level_phase(state_map, f"U{n}") == "sold"
-                for n in range(_upper_idx(level.level_id) + 1, 4)
+                for n in range(_upper_idx(level.level_id) + 1, max_upper + 1)
             ):
                 continue
             return higher
@@ -997,6 +1030,9 @@ def _process_single_price_step(
     max_lower = parsed["grid_levels_below"]
     session_anchor = _num(rt.get("sessionAnchorPrice"))
     invert_grid = bool(parsed.get("invert_grid"))
+    # Exit side of the grid (upper for normal, lower for inverted) — the floor is
+    # based on this side so the whole inventory can reach zero lots.
+    exit_side_levels = max_lower if invert_grid else max_upper
 
     for i in range(2, max_upper + 1):
         lower_level = next((l for l in levels if l.level_id == f"U{i - 1}"), None)
@@ -1048,15 +1084,24 @@ def _process_single_price_step(
                 upper_arm_locks[level.level_id] = False
 
         absolute_floor = _absolute_inventory_floor(
-            parsed["initial_lots"], max_upper, parsed["lots_per_grid"]
+            parsed["initial_lots"], exit_side_levels, parsed["lots_per_grid"]
         )
         protected_floor = _protected_inventory_floor(
-            parsed["initial_lots"], level_states, max_upper, parsed["lots_per_grid"]
+            parsed["initial_lots"],
+            level_states,
+            exit_side_levels,
+            parsed["lots_per_grid"],
+            invert_grid=invert_grid,
         )
 
         phase = _level_phase(level_states, level.level_id)
         max_sold = _max_sold_upper(level_states, max_upper)
         cross_fn = _action_for_cross_inverted if invert_grid else _action_for_cross
+        reenter_hold_level = level.level_id
+        if level.kind == "upper" and direction == "down":
+            # At U4 on the way down we re-enter the position sold/added at U5,
+            # so the hold belongs to U5, not the U4 crossing level.
+            reenter_hold_level = f"U{_upper_idx(level.level_id) + 1}"
         action_type, delta, msg, new_phase, neutralize_level = cross_fn(
             level,
             direction,
@@ -1067,7 +1112,7 @@ def _process_single_price_step(
             base_entered=base_entered,
             position_lots=position,
             upper_arm_locked=bool(upper_arm_locks.get(level.level_id)),
-            upper_reenter_held=bool(upper_reenter_hold.get(level.level_id)),
+            upper_reenter_held=bool(upper_reenter_hold.get(reenter_hold_level)),
             max_sold_upper=max_sold,
             upper_peak_sold=upper_peak_sold,
             levels_above=max_upper,
@@ -1173,10 +1218,14 @@ def _process_single_price_step(
             "baseEntered": base_entered or position > 0,
             "coreLots": parsed["initial_lots"],
             "inventoryFloorLots": _absolute_inventory_floor(
-                parsed["initial_lots"], max_upper, parsed["lots_per_grid"]
+                parsed["initial_lots"], exit_side_levels, parsed["lots_per_grid"]
             ),
             "protectedFloorLots": _protected_inventory_floor(
-                parsed["initial_lots"], level_states, max_upper, parsed["lots_per_grid"]
+                parsed["initial_lots"],
+                level_states,
+                exit_side_levels,
+                parsed["lots_per_grid"],
+                invert_grid=invert_grid,
             ),
             "gridAddedLots": _d_added_lots(level_states, max_lower, parsed["lots_per_grid"]),
             "levelStates": level_states,

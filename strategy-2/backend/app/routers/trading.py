@@ -115,12 +115,15 @@ def put_trading_settings(
                     rt["sessionReferencePrice"] = new_ref
                 merged_config["grid_runtime"] = rt
         elif isinstance(runtime, dict):
-            # Algo stopped: sync session ref to saved Reference Price so Grid Display matches settings.
+            # Algo stopped: sync session ref to saved Reference Price so Grid Display
+            # matches settings — but only while flat. An open grid keeps its frozen
+            # reference so the ladder does not move before the algo is resumed.
             from app.services.grid_logic import _num
 
             rt = dict(runtime)
+            in_trade = int(rt.get("positionLots") or 0) > 0 or bool(rt.get("baseEntered"))
             new_ref = _num(merged_config.get("referencePrice"))
-            if new_ref > 0:
+            if new_ref > 0 and not in_trade:
                 rt["sessionReferencePrice"] = new_ref
             merged_config["grid_runtime"] = rt
 
@@ -136,18 +139,29 @@ def put_trading_settings(
     new_mode = (row.trading_mode or "PAPER").upper()
 
     if body.algo_running is not None and new_run != prev_run:
+        resumed_open_grid = False
         if new_run:
-            parsed = parse_strategy_config(tr.load_config_dict(db, user.id))
-            quote = get_quote_by_key(parsed["market"])
-            px = float(quote.price if quote and quote.price > 0 else 0)
-            tr.reset_algo_session(db, user.id, current_price=px)
+            if tr.has_open_grid_session(db, user.id):
+                # Open grid: resume from persisted runtime — active trades stay open.
+                resumed_open_grid = True
+            else:
+                parsed = parse_strategy_config(tr.load_config_dict(db, user.id))
+                quote = get_quote_by_key(parsed["market"])
+                px = float(quote.price if quote and quote.price > 0 else 0)
+                tr.reset_algo_session(db, user.id, current_price=px)
         tr.append_trading_log(
             db,
             user_id=user.id,
             mode=new_mode,
             leg="-",
             action="ALGO_STARTED" if new_run else "ALGO_STOPPED",
-            message="Algo enabled" if new_run else "Algo disabled",
+            message=(
+                "Algo enabled — resumed open grid (active trades kept)"
+                if resumed_open_grid
+                else "Algo enabled"
+            )
+            if new_run
+            else "Algo disabled",
         )
     if body.trading_mode is not None and new_mode != prev_mode:
         tr.append_trading_log(
