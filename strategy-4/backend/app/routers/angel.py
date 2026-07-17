@@ -143,6 +143,10 @@ def angel_live_quote(_user: User = Depends(get_current_user)):
     Cached live quote (LTP/OHLC/FULL per `ANGEL_QUOTE_MODE`).
     Response includes normalized `fetched` / `unfetched` when Angel returns them.
     """
+    from app.services.angel_jwt_refresh import reload_angel_tokens_from_env
+
+    reload_angel_tokens_from_env()
+
     if not (settings.angel_api_key or "").strip() or not (settings.angel_jwt_token or "").strip():
         raise HTTPException(
             status_code=503,

@@ -326,12 +326,13 @@ async def _async_refresh_token_job() -> None:
 
 
 def _sync_refresh_token_job() -> None:
+    """Periodic health check: validate the JWT and auto-heal (refresh token → TOTP script)."""
     try:
-        from app.services.angel_jwt_refresh import try_refresh_angel_jwt_via_refresh_token
+        from app.services.angel_jwt_refresh import ensure_valid_angel_session
 
-        try_refresh_angel_jwt_via_refresh_token(reason="scheduler_interval")
+        ensure_valid_angel_session(reason="scheduler_interval")
     except Exception as e:  # noqa: BLE001
-        LOG.warning("%s Scheduled JWT refresh error: %s", SCHED_PREFIX, e)
+        LOG.warning("%s Scheduled JWT health check error: %s", SCHED_PREFIX, e)
 
 
 def start_angel_auto_login_scheduler() -> None:
@@ -371,12 +372,12 @@ def start_angel_auto_login_scheduler() -> None:
     )
     _scheduler.add_job(
         _async_refresh_token_job,
-        IntervalTrigger(hours=8),
+        IntervalTrigger(minutes=10),
         id=JOB_REFRESH_ID,
         replace_existing=True,
     )
     _scheduler.start()
-    LOG.info("%s Angel One auto-login scheduled for 00:30 daily; JWT refresh via token every 8h", SCHED_PREFIX)
+    LOG.info("%s Angel One auto-login scheduled for 00:30 daily; JWT health check every 10 min", SCHED_PREFIX)
 
 
 def stop_angel_auto_login_scheduler() -> None:
@@ -394,13 +395,30 @@ def stop_angel_auto_login_scheduler() -> None:
 def trigger_manual_angel_login() -> dict[str, Any]:
     """
     Synchronous manual run (for API handler). Runs in thread pool if called from async.
-    Tries lightweight refresh-token exchange first, then full TOTP login script.
+    Every step is verified with a real Angel quote call — success is only reported
+    when the JWT actually works for market data (no more fake "token generated").
     """
-    from app.services.angel_jwt_refresh import try_refresh_angel_jwt_via_refresh_token
+    from app.services.angel_jwt_refresh import (
+        reload_angel_tokens_from_env,
+        try_refresh_angel_jwt_via_refresh_token,
+        validate_angel_session,
+    )
 
+    # 1) Pick up tokens written by a manual script run / another strategy backend.
+    reload_angel_tokens_from_env()
+    usable, _detail = validate_angel_session()
+    if usable:
+        _clear_quote_caches()
+        return {"ok": True, "message": "Angel session valid — live quotes active"}
+
+    # 2) Lightweight refresh-token exchange, then verify it really works.
     if try_refresh_angel_jwt_via_refresh_token(reason="manual_api", force=True):
-        return {"ok": True, "message": "Angel session refreshed (refresh token)"}
+        usable, detail = validate_angel_session()
+        if usable:
+            return {"ok": True, "message": "Angel session refreshed (refresh token)"}
+        LOG.warning("%s Refresh-token JWT still rejected: %s", SCHED_PREFIX, detail)
 
+    # 3) Full TOTP login script.
     ok, errs = verify_angel_login_paths()
     if not ok:
         return {"ok": False, "error": "; ".join(errs)}
@@ -413,7 +431,16 @@ def trigger_manual_angel_login() -> dict[str, Any]:
         }
     if not apply_jwt_from_env_file():
         return {"ok": False, "error": "script ran but ANGEL_JWT_TOKEN was not reloaded from backend/.env"}
-    return {"ok": True, "message": "Angel session refreshed"}
+    usable, detail = validate_angel_session()
+    if not usable:
+        return {
+            "ok": False,
+            "error": (
+                f"Token generated but Angel still rejects it: {detail}. "
+                "Check ANGEL_API_KEY belongs to the same Angel app, VPS clock (NTP) and ANGEL_CLIENT_PUBLIC_IP."
+            ),
+        }
+    return {"ok": True, "message": "Angel session refreshed and verified"}
 
 
 async def trigger_manual_angel_login_async() -> dict[str, Any]:

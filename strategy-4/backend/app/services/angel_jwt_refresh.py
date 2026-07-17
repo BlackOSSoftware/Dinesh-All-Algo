@@ -26,6 +26,20 @@ GENERATE_TOKENS_URL = "https://apiconnect.angelone.in/rest/auth/angelbroking/jwt
 _last_refresh_attempt_mono: float = 0.0
 _REFRESH_DEBOUNCE_SEC = 90.0
 
+_last_full_login_mono: float = 0.0
+_FULL_LOGIN_DEBOUNCE_SEC = 300.0
+
+
+def _is_token_error_text(text: str) -> bool:
+    t = (text or "").lower()
+    return (
+        "invalid token" in t
+        or "tokenexception" in t
+        or "token is invalid" in t
+        or "ag8001" in t
+        or ("jwt" in t and "expired" in t)
+    )
+
 
 def backend_root() -> Path:
     return Path(__file__).resolve().parent.parent.parent
@@ -220,3 +234,93 @@ def save_refresh_token_to_env_and_runtime(refresh: str) -> None:
     _update_env_key(env_path, "ANGEL_REFRESH_TOKEN", r)
     os.environ["ANGEL_REFRESH_TOKEN"] = r
     object.__setattr__(settings, "angel_refresh_token", r)
+
+
+def validate_angel_session() -> tuple[bool, str]:
+    """
+    Verify the current JWT with a real quote call (SENSEX index token — works on any session).
+    Returns (usable, detail). Only a token-style rejection marks the session unusable;
+    rate limits / network errors are treated as usable so we don't relogin needlessly.
+    """
+    from app.config import settings
+    from app.services.angel_quote import post_market_quote, _truthy_status
+
+    api_key = (settings.angel_api_key or "").strip()
+    jwt = (settings.angel_jwt_token or "").strip()
+    if not api_key or not jwt:
+        return False, "ANGEL_API_KEY or ANGEL_JWT_TOKEN missing"
+
+    try:
+        raw = post_market_quote(
+            api_key=api_key,
+            jwt_token=jwt,
+            source_id=(settings.angel_source_id or "WEB").strip(),
+            client_local_ip=(settings.angel_client_local_ip or "127.0.0.1").strip(),
+            client_public_ip=(settings.angel_client_public_ip or "127.0.0.1").strip(),
+            mac_address=(settings.angel_mac_address or "00:00:00:00:00:00").strip(),
+            user_type=(settings.angel_user_type or "USER").strip(),
+            mode="LTP",
+            exchange_tokens={"BSE": ["99919000"]},
+            timeout_sec=8.0,
+        )
+    except Exception as exc:  # noqa: BLE001
+        msg = str(exc)
+        if _is_token_error_text(msg):
+            return False, msg[:300]
+        return True, f"non-token error ignored: {msg[:200]}"
+
+    msg = str(raw.get("message") or raw.get("Message") or "") if isinstance(raw, dict) else ""
+    if _truthy_status(raw):
+        return True, "ok"
+    if _is_token_error_text(msg):
+        return False, msg[:300]
+    return True, f"non-token status ignored: {msg[:200]}"
+
+
+def ensure_valid_angel_session(*, reason: str, force: bool = False) -> bool:
+    """
+    Auto-heal the Angel session:
+      1. Reload tokens from backend/.env (picks up manual script runs).
+      2. Validate the current JWT with a real quote call — if usable, done.
+      3. Refresh-token exchange, then re-validate.
+      4. Full TOTP login script (debounced), then re-validate.
+    Returns True only when a JWT that Angel actually accepts is in place.
+    """
+    global _last_full_login_mono
+
+    reload_angel_tokens_from_env()
+
+    ok, detail = validate_angel_session()
+    if ok:
+        return True
+    LOG.warning("Angel session invalid (%s): %s — auto-healing", reason, detail)
+
+    if try_refresh_angel_jwt_via_refresh_token(reason=reason, force=True):
+        ok, detail = validate_angel_session()
+        if ok:
+            LOG.info("Angel session restored via refresh token (%s)", reason)
+            return True
+        LOG.warning("Angel refresh-token JWT still rejected (%s): %s", reason, detail)
+
+    now = time.monotonic()
+    if not force and now - _last_full_login_mono < _FULL_LOGIN_DEBOUNCE_SEC:
+        LOG.debug("Angel full login debounced (%s)", reason)
+        return False
+    _last_full_login_mono = now
+
+    try:
+        from app.services.angel_auto_login_scheduler import (
+            apply_jwt_from_env_file,
+            run_angel_smartapi_login_subprocess,
+        )
+
+        ok_run, _stdout, _stderr, _rc = run_angel_smartapi_login_subprocess(reason=reason)
+        if ok_run and apply_jwt_from_env_file():
+            ok, detail = validate_angel_session()
+            if ok:
+                LOG.info("Angel session restored via TOTP login script (%s)", reason)
+                return True
+            LOG.error("Angel TOTP login produced a JWT that is still rejected (%s): %s", reason, detail)
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning("Angel TOTP login failed (%s): %s", reason, exc)
+    return False

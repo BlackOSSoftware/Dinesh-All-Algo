@@ -41,6 +41,9 @@ def _bse_session_open() -> bool:
 
 def _is_token_error(msg: str) -> bool:
     t = (msg or "").lower()
+    if "access rate" in t or "exceeding" in t:
+        # Rate limit — retrying with a new token would only burn more requests.
+        return False
     return (
         "invalid token" in t
         or "tokenexception" in t
@@ -104,31 +107,14 @@ def _save_disk_ltp(price: float) -> None:
 
 
 def _maybe_restore_angel_session(*, reason: str) -> bool:
-    global _last_login_mono
-
-    from app.services.angel_jwt_refresh import try_refresh_angel_jwt_via_refresh_token
-
-    if try_refresh_angel_jwt_via_refresh_token(reason=reason, force=True):
-        return True
-
-    now = time.monotonic()
-    if now - _last_login_mono < _LOGIN_DEBOUNCE_SEC:
-        return False
-    _last_login_mono = now
+    """Auto-heal Angel session: env reload → validate → refresh token → TOTP script."""
+    from app.services.angel_jwt_refresh import ensure_valid_angel_session
 
     try:
-        from app.services.angel_auto_login_scheduler import (
-            apply_jwt_from_script_output,
-            run_angel_smartapi_login_subprocess,
-        )
-
-        ok, stdout, _stderr, _rc = run_angel_smartapi_login_subprocess(reason=reason)
-        if ok and apply_jwt_from_script_output(stdout):
-            LOG.info("SENSEX quote: Angel session restored via login script (%s)", reason)
-            return True
+        return ensure_valid_angel_session(reason=reason)
     except Exception as exc:  # noqa: BLE001
-        LOG.warning("SENSEX quote: Angel login failed (%s): %s", reason, exc)
-    return False
+        LOG.warning("SENSEX quote: Angel session auto-heal failed (%s): %s", reason, exc)
+        return False
 
 
 def _request_quote(

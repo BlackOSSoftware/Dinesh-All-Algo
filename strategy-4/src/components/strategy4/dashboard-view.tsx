@@ -152,6 +152,43 @@ function DataTable({
   );
 }
 
+function MarketQuotesRow({ quotes, selectedKey }: { quotes: MarketQuote[]; selectedKey: string }) {
+  if (!quotes.length) return null;
+  return (
+    <div className="grid gap-3 sm:grid-cols-3">
+      {quotes.map((q) => {
+        const isLive = Boolean(q.market_open && (q.source ?? "").toLowerCase() === "live");
+        const isSelected = q.key.toUpperCase() === selectedKey;
+        return (
+          <PremiumCard
+            key={q.key}
+            className={cn("!p-3", isSelected && "ring-1 ring-[var(--accent)]")}
+          >
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs font-semibold text-[var(--text-secondary)]">{q.label}</span>
+              <span
+                className={cn(
+                  "rounded-full px-2 py-0.5 text-[9px] font-semibold uppercase",
+                  isLive
+                    ? "bg-[var(--success-soft)] text-[var(--success)]"
+                    : "bg-[var(--warning-soft)] text-[var(--warning)]",
+                )}
+              >
+                {isLive ? "Live" : "Last"}
+              </span>
+            </div>
+            <p className="mt-1 text-2xl font-semibold tabular-nums text-[var(--text-primary)]">{fmtPx(q.price)}</p>
+            <p className="mt-0.5 truncate text-[10px] text-[var(--text-muted)]">
+              {q.tradingsymbol || "—"}
+              {q.error ? ` · ${q.error}` : ""}
+            </p>
+          </PremiumCard>
+        );
+      })}
+    </div>
+  );
+}
+
 function StatusCard({
   data,
   quote,
@@ -392,6 +429,8 @@ export function Strategy4DashboardView() {
           Algo: {data?.algo_running ? "Running" : "Stopped"} · Mode: {data?.trading_mode ?? "PAPER"}
         </p>
       </PremiumCard>
+
+      <MarketQuotesRow quotes={quotes} selectedKey={selectedMarket} />
 
       <StatusCard data={data} quote={activeQuote} />
 

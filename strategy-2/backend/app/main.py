@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 import logging
+import threading
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -64,34 +65,35 @@ async def lifespan(_: FastAPI):
 
     start_angel_auto_login_scheduler()
 
-    try:
-        from app.services.mcx_quotes import fetch_all_mcx_quotes
+    def _startup_mcx_quote_check() -> None:
+        try:
+            from app.services.mcx_quotes import ensure_angel_session_for_quotes, fetch_all_mcx_quotes
 
-        quotes = fetch_all_mcx_quotes()
-        live_count = sum(1 for q in quotes if q.source == "live" and q.price > 0)
-        if quotes and live_count == 0 and any(q.error and "token" in (q.error or "").lower() for q in quotes):
-            from app.services.mcx_quotes import ensure_angel_session_for_quotes
+            quotes = fetch_all_mcx_quotes()
+            live_count = sum(1 for q in quotes if q.source == "live" and q.price > 0)
+            if quotes and live_count == 0 and any(q.error and "token" in (q.error or "").lower() for q in quotes):
+                if ensure_angel_session_for_quotes(reason="startup_token_check"):
+                    quotes = fetch_all_mcx_quotes()
+                    live_count = sum(1 for q in quotes if q.source == "live" and q.price > 0)
+            LOG.info("MCX startup quotes: %d instruments, %d live", len(quotes), live_count)
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("MCX startup quote check failed: %s", exc)
 
-            if ensure_angel_session_for_quotes(reason="startup_token_check"):
-                quotes = fetch_all_mcx_quotes()
-                live_count = sum(1 for q in quotes if q.source == "live" and q.price > 0)
-        LOG.info("MCX startup quotes: %d instruments, %d live", len(quotes), live_count)
-    except Exception as exc:  # noqa: BLE001
-        LOG.warning("MCX startup quote check failed: %s", exc)
+        try:
+            from app.services.mcx_instruments import load_mcx_instruments
 
-    try:
-        from app.services.mcx_instruments import load_mcx_instruments
+            for key, inst in load_mcx_instruments().items():
+                LOG.info(
+                    "MCX %s token=%s symbol=%s configured=%s",
+                    key,
+                    inst.token or "-",
+                    inst.tradingsymbol or "-",
+                    inst.configured,
+                )
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("MCX instrument resolve failed at startup: %s", exc)
 
-        for key, inst in load_mcx_instruments().items():
-            LOG.info(
-                "MCX %s token=%s symbol=%s configured=%s",
-                key,
-                inst.token or "-",
-                inst.tradingsymbol or "-",
-                inst.configured,
-            )
-    except Exception as exc:  # noqa: BLE001
-        LOG.warning("MCX instrument resolve failed at startup: %s", exc)
+    threading.Thread(target=_startup_mcx_quote_check, name="mcx-startup-check", daemon=True).start()
 
     start_grid_engine_task()
     LOG.info("Strategy 2 backend startup complete")

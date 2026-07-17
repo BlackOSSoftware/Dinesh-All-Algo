@@ -2,6 +2,8 @@ import { getApiBase, getStoredToken } from "@/lib/auth";
 
 export function isAngelTokenErrorText(s: string | null | undefined): boolean {
   if (!s || !s.trim()) return false;
+  // Rate-limit rejections are transient and NOT a token problem.
+  if (/access\s*rate|exceeding|rate\s*limit/i.test(s)) return false;
   return /invalid\s*token|jwt\s*expired|token\s*expired|access\s*denied|ag8001|angel\s*one\s*not\s*configured|angel_jwt_token|not\s*configured|quote\s*unavailable|regenerate\s*token/i.test(
     s,
   );

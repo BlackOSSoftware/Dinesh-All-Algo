@@ -19,7 +19,9 @@ from app.services.mcx_instruments import McxInstrument, load_mcx_instruments
 LOG = logging.getLogger(__name__)
 
 _CACHE: dict[str, tuple[float, float, bool, str, str]] = {}
-_CACHE_TTL_SEC = 0.2
+# One Angel batch call covers all MCX symbols; keep well under Angel's rate budget
+# (4 strategy backends share one Angel account).
+_CACHE_TTL_SEC = 1.5
 _LTP_DISK_PATH = BACKEND_ROOT / "instance" / "mcx_last_ltp.json"
 
 _LTP_KEYS = ("ltp", "LTP", "lastTradePrice", "lasttradeprice", "LastTradePrice", "lastPrice")
@@ -74,36 +76,24 @@ def _angel_headers() -> dict[str, str]:
 
 def _is_token_error_message(msg: str) -> bool:
     t = (msg or "").lower()
-    return "invalid token" in t or "tokenexception" in t or "token is invalid" in t
+    return (
+        "invalid token" in t
+        or "tokenexception" in t
+        or "token is invalid" in t
+        or "ag8001" in t
+        or ("jwt" in t and "expired" in t)
+    )
 
 
 def _maybe_refresh_angel_session(*, reason: str) -> bool:
-    """Try refresh-token exchange, then full TOTP login. Debounced for full login."""
-    global _last_token_login_mono
-
-    from app.services.angel_jwt_refresh import try_refresh_angel_jwt_via_refresh_token
-
-    if try_refresh_angel_jwt_via_refresh_token(reason=reason, force=True):
-        return True
-
-    now = time.monotonic()
-    if now - _last_token_login_mono < _TOKEN_LOGIN_DEBOUNCE_SEC:
-        return False
-    _last_token_login_mono = now
+    """Auto-heal Angel session: env reload → validate → refresh token → TOTP script."""
+    from app.services.angel_jwt_refresh import ensure_valid_angel_session
 
     try:
-        from app.services.angel_auto_login_scheduler import (
-            apply_jwt_from_script_output,
-            run_angel_smartapi_login_subprocess,
-        )
-
-        ok, stdout, _stderr, _rc = run_angel_smartapi_login_subprocess(reason=reason)
-        if ok and apply_jwt_from_script_output(stdout):
-            LOG.info("Angel session restored via TOTP login (%s)", reason)
-            return True
+        return ensure_valid_angel_session(reason=reason)
     except Exception as exc:  # noqa: BLE001
-        LOG.warning("Angel TOTP login failed (%s): %s", reason, exc)
-    return False
+        LOG.warning("Angel session auto-heal failed (%s): %s", reason, exc)
+        return False
 
 
 def _pick_float(row: dict[str, Any], keys: tuple[str, ...]) -> float | None:
@@ -185,12 +175,18 @@ def _fetch_batch_quotes(
     if not exchange_tokens:
         return {}
 
-    raw = post_market_quote(
-        mode=_quote_mode(),
-        exchange_tokens=exchange_tokens,
-        timeout_sec=float(settings.angel_request_timeout_sec or 15.0),
-        **_angel_headers(),
-    )
+    try:
+        raw = post_market_quote(
+            mode=_quote_mode(),
+            exchange_tokens=exchange_tokens,
+            timeout_sec=float(settings.angel_request_timeout_sec or 15.0),
+            **_angel_headers(),
+        )
+    except RuntimeError as exc:
+        # HTTP 403 token rejection whose internal refresh retry failed — full heal + one retry.
+        if _is_token_error_message(str(exc)) and _retry_depth < 1 and _maybe_refresh_angel_session(reason="mcx_quote_http_token"):
+            return _fetch_batch_quotes(instruments, _retry_depth=_retry_depth + 1)
+        raise
     if not _truthy_status(raw):
         msg = str(raw.get("message") or raw.get("errorcode") or raw.get("errorCode") or "Angel quote failed")
         if _is_token_error_message(msg) and _retry_depth < 1 and _maybe_refresh_angel_session(reason="mcx_quote_token"):
@@ -370,8 +366,13 @@ def _fetch_all_mcx_quotes_locked() -> list[QuoteResult]:
                 LOG.debug("MCX %s %s %s=%.2f", inst.key, inst.tradingsymbol, price_type, price)
         except Exception as exc:  # noqa: BLE001
             LOG.warning("MCX batch quote failed: %s", exc)
+            err_text = str(exc)
+            if "access rate" in err_text.lower() or "exceeding" in err_text.lower():
+                # Rate limit is transient and NOT a token problem — show last price
+                # without tripping the Generate Token banner.
+                err_text = "Angel rate limit — showing last price, retrying"
             for inst in configured:
-                cached_row = _quote_from_cache(inst.key, inst, error=str(exc)[:160])
+                cached_row = _quote_from_cache(inst.key, inst, error=err_text[:160])
                 results.append(cached_row)
 
     order = {inst.key: i for i, inst in enumerate(instruments)}
