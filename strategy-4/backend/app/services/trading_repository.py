@@ -286,8 +286,13 @@ def reset_algo_session(db: Session, user_id: int, *, current_price: float = 0.0)
     for pos in list_open_positions(db, user_id):
         px = mark if mark > 0 else float(pos.entry_price or 0)
         entry = float(pos.entry_price or 0.0)
-        lots = int(pos.lots or 0)
-        pnl = (px - entry) * lots if entry > 0 else 0.0
+        qty = int(pos.quantity or 0) or int(pos.lots or 0)
+        side = (pos.side or "").upper()
+        if entry > 0 and qty > 0:
+            # Side-aware rupee PnL (SELL shorts earn when price falls).
+            pnl = (px - entry) * qty if side == "BUY" else (entry - px) * qty
+        else:
+            pnl = 0.0
         close_position(db, pos, exit_price=px, exit_reason="ALGO_RESTART", pnl=pnl)
 
     return runtime

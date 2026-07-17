@@ -977,7 +977,6 @@ def process_price_tick(cfg: dict[str, Any], runtime: dict[str, Any], price: floa
     prev = _num(rt.get("prevPrice"))
     if prev <= 0:
         prev = _num(rt.get("lastPrice")) or price
-    lo, hi = (min(prev, price), max(prev, price))
     rt["prevPrice"] = round(price, 4)
     rt["lastPrice"] = round(price, 4)
     phase = str(rt.get("phase") or "IDLE")
@@ -988,42 +987,44 @@ def process_price_tick(cfg: dict[str, Any], runtime: dict[str, Any], price: floa
     if phase == "WAIT_BREAKOUT":
         buy_trig = _num(rt.get("buyTrigger"))
         sell_trig = _num(rt.get("sellTrigger"))
-        ref = _num(rt.get("referencePrice"))
         side: Side | None = None
-        # Path cross OR already beyond trigger on this tick (gap / late arm).
-        hit_buy = buy_trig > 0 and (hi >= buy_trig - 1e-9 or price >= buy_trig - 1e-9)
-        hit_sell = sell_trig > 0 and (lo <= sell_trig + 1e-9 or price <= sell_trig + 1e-9)
+        # Decide strictly on the CURRENT price: BUY only at/above the buy trigger,
+        # SELL only at/below the sell trigger. These are mutually exclusive
+        # (buy trigger > sell trigger), so a falling price at the sell level can
+        # never open a BUY — direction is always correct.
         if buy_trig > 0 and sell_trig > 0:
-            if hit_buy and hit_sell:
-                side = "SELL" if ref > 0 and prev <= ref else "BUY"
-            elif hit_buy:
+            if price >= buy_trig - 1e-9:
                 side = "BUY"
-            elif hit_sell:
+            elif price <= sell_trig + 1e-9:
                 side = "SELL"
         if side:
             rt, entry_action = _open_entry(side=side, fill=round(price, 4), parsed=parsed, rt=rt, is_reverse=False)
             actions.append(entry_action)
-            phase = str(rt.get("phase"))
-        else:
-            rt["message"] = (
-                f"Armed · LTP {price:.2f} · Buy {buy_trig:.2f} (gap {buy_trig - price:+.2f}) · "
-                f"Sell {sell_trig:.2f} (gap {price - sell_trig:+.2f})"
-            )
+            # Entry done on this tick — TP/SL evaluation starts from the next tick
+            # so the same tick's price span can never instantly stop out the entry.
+            return rt, actions
+        rt["message"] = (
+            f"Armed · LTP {price:.2f} · Buy {buy_trig:.2f} (gap {buy_trig - price:+.2f}) · "
+            f"Sell {sell_trig:.2f} (gap {price - sell_trig:+.2f})"
+        )
 
     if phase in ("IN_TRADE", "REVERSE_TRADE") and rt.get("side") in ("BUY", "SELL"):
         side = rt["side"]  # type: Side
         tp = _num(rt.get("tpPrice"))
         sl = _num(rt.get("slPrice"))
         exit_reason: str | None = None
+        # Exit strictly on the CURRENT price (no stale prev-price span):
+        # BUY  → SL when price <= SL, TP when price >= TP.
+        # SELL → SL when price >= SL, TP when price <= TP.
         if side == "BUY":
-            if lo <= sl + 1e-9 or price <= sl + 1e-9:
+            if sl > 0 and price <= sl + 1e-9:
                 exit_reason = "SL"
-            elif hi >= tp - 1e-9 or price >= tp - 1e-9:
+            elif tp > 0 and price >= tp - 1e-9:
                 exit_reason = "TP"
         else:
-            if hi >= sl - 1e-9 or price >= sl - 1e-9:
+            if sl > 0 and price >= sl - 1e-9:
                 exit_reason = "SL"
-            elif lo <= tp + 1e-9 or price <= tp + 1e-9:
+            elif tp > 0 and price <= tp + 1e-9:
                 exit_reason = "TP"
         if exit_reason:
             allow_rev = exit_reason == "SL" and phase == "IN_TRADE"

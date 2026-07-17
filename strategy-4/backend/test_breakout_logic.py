@@ -170,6 +170,169 @@ def test_live_tick_sells_on_path_cross():
     assert next_rt["side"] == "SELL"
 
 
+def _armed_rt(prev=300.0, last=300.0):
+    return {
+        "phase": "WAIT_BREAKOUT",
+        "referencePrice": 300.0,
+        "buyTrigger": 300.5,
+        "sellTrigger": 299.5,
+        "prevPrice": prev,
+        "lastPrice": last,
+        "tradeCount": 0,
+        "realizedPnl": 0.0,
+    }
+
+
+def test_sell_trigger_with_stale_high_prev_price_opens_sell_not_buy():
+    """Regression: stale prevPrice above the buy trigger must NOT flip a sell
+    breakout into a BUY (live bug: sell-side order executed as BUY)."""
+    cfg = _cfg()
+    rt = _armed_rt(prev=302.0, last=302.0)  # stale/garbage prev above buy trigger
+    next_rt, actions = process_price_tick(cfg, rt, 299.4)
+    assert next_rt["side"] == "SELL"
+    assert [a["action"] for a in actions] == ["INITIAL_SELL"]
+
+
+def test_buy_trigger_with_stale_low_prev_price_opens_buy_not_sell():
+    cfg = _cfg()
+    rt = _armed_rt(prev=295.0, last=295.0)  # stale prev far below sell trigger
+    next_rt, actions = process_price_tick(cfg, rt, 300.6)
+    assert next_rt["side"] == "BUY"
+    assert [a["action"] for a in actions] == ["INITIAL_BUY"]
+
+
+def test_entry_tick_never_exits_on_same_tick():
+    """Regression: the entry tick must not instantly hit SL from a stale prev span."""
+    cfg = _cfg()
+    rt = _armed_rt(prev=305.0, last=305.0)  # prev span would cross SELL SL (300.2)
+    next_rt, actions = process_price_tick(cfg, rt, 299.5)
+    assert [a["action"] for a in actions] == ["INITIAL_SELL"]
+    assert next_rt["phase"] == "IN_TRADE"
+    assert next_rt["positionLots"] == 4
+
+
+def _open_sell_rt(entry=299.5):
+    tp, sl = compute_tp_sl("SELL", entry, 1.0, 0.8)
+    return {
+        "phase": "IN_TRADE",
+        "referencePrice": 300.0,
+        "buyTrigger": 300.5,
+        "sellTrigger": 299.5,
+        "side": "SELL",
+        "entryPrice": entry,
+        "tpPrice": tp,     # 298.5 (below entry)
+        "slPrice": sl,     # 300.3 (above entry)
+        "isReverse": False,
+        "tradeCount": 1,
+        "positionLots": 4,
+        "realizedPnl": 0.0,
+        "prevPrice": entry,
+        "lastPrice": entry,
+    }
+
+
+def test_sell_trade_tp_hits_below_entry_with_profit():
+    cfg = _cfg()
+    rt = _open_sell_rt()
+    next_rt, actions = process_price_tick(cfg, rt, 298.5)
+    assert [a["action"] for a in actions] == ["EXIT_TP"]
+    assert actions[0]["tradePnl"] == 4.0  # (299.5 - 298.5) * 4 lots
+    assert next_rt["phase"] == "DONE"
+
+
+def test_sell_trade_sl_hits_above_entry_and_reverses_buy():
+    cfg = _cfg()
+    rt = _open_sell_rt()
+    next_rt, actions = process_price_tick(cfg, rt, 300.3)
+    assert [a["action"] for a in actions] == ["EXIT_SL", "REVERSE_BUY"]
+    assert actions[0]["tradePnl"] == -3.2  # (299.5 - 300.3) * 4 lots
+    assert next_rt["side"] == "BUY"
+    assert next_rt["phase"] == "REVERSE_TRADE"
+
+
+def test_sell_trade_profitable_move_never_hits_sl():
+    """Regression: falling price on a SELL is profit — must not exit as SL."""
+    cfg = _cfg()
+    rt = _open_sell_rt()
+    for px in (299.3, 299.0, 298.8, 298.6):
+        rt, actions = process_price_tick(cfg, rt, px)
+        assert not actions, f"unexpected exit at {px}: {actions}"
+    assert rt["side"] == "SELL"
+    assert rt["positionLots"] == 4
+
+
+def test_no_duplicate_entries_while_price_stays_beyond_trigger():
+    cfg = _cfg()
+    rt = _armed_rt()
+    rt, actions = process_price_tick(cfg, rt, 299.4)
+    assert len(actions) == 1
+    # Price keeps grinding lower — no second entry, only eventual TP.
+    rt, actions = process_price_tick(cfg, rt, 299.2)
+    assert actions == []
+    rt, actions = process_price_tick(cfg, rt, 298.4)
+    assert [a["action"] for a in actions] == ["EXIT_TP"]
+    rt, actions = process_price_tick(cfg, rt, 297.0)
+    assert actions == []  # DONE — no further trades
+
+
+def test_midnight_rollover_keeps_open_trade():
+    """An open trade must survive the IST date flip (overnight session) so its
+    TP/SL keeps being managed instead of orphaning the broker position."""
+    rt = _open_sell_rt()
+    rt["sessionDate"] = "2026-07-16"
+    original = eng._session_date
+    eng._session_date = lambda: "2026-07-17"
+    try:
+        out = eng._ensure_daily_session(_cfg(), rt)
+        assert out["side"] == "SELL"
+        assert out["positionLots"] == 4
+        assert out["sessionDate"] == "2026-07-17"
+        assert out["carriedFromPrevDay"] is True
+
+        # Flat runtime at date flip still re-arms fresh as before.
+        flat = {"sessionDate": "2026-07-16", "phase": "DONE", "positionLots": 0}
+        fresh = eng._ensure_daily_session(_cfg(), flat)
+        assert fresh["phase"] == "WAIT_REF"
+        assert fresh["positionLots"] == 0
+
+        # Once the carried trade finishes, the same day re-arms a new session.
+        done = {**out, "phase": "DONE", "positionLots": 0, "side": None, "realizedPnl": 4.0}
+        rearmed = eng._ensure_daily_session(_cfg(), done)
+        assert rearmed["phase"] == "WAIT_REF"
+        assert rearmed["realizedPnl"] == 4.0
+    finally:
+        eng._session_date = original
+
+
+def test_live_order_transaction_mapping():
+    """Engine → broker mapping: entries use the action side, exits use the opposite.
+    Missing side must NEVER silently default to BUY."""
+    assert eng._broker_tx_for({"action": "INITIAL_BUY", "side": "BUY"}) == "BUY"
+    assert eng._broker_tx_for({"action": "INITIAL_SELL", "side": "SELL"}) == "SELL"
+    assert eng._broker_tx_for({"action": "REVERSE_BUY", "side": "BUY"}) == "BUY"
+    assert eng._broker_tx_for({"action": "REVERSE_SELL", "side": "SELL"}) == "SELL"
+    assert eng._broker_tx_for({"action": "EXIT_TP", "side": "BUY"}) == "SELL"
+    assert eng._broker_tx_for({"action": "EXIT_SL", "side": "SELL"}) == "BUY"
+    # Side inferred from action name when field is missing.
+    assert eng._broker_tx_for({"action": "INITIAL_SELL"}) == "SELL"
+    assert eng._broker_tx_for({"action": "EXIT_TP", "side": "SELL"}) == "BUY"
+    # Truly unknown → refuse (do not default to BUY).
+    assert eng._broker_tx_for({"action": "EXIT_TP"}) is None
+    assert eng._broker_tx_for({"action": "UNKNOWN"}) is None
+
+
+def test_tick_price_cache_cleared_on_market_switch():
+    """Stale prevPrice from another instrument must not poison the next tick."""
+    eng._TICK_PRICE[42] = ("2026-07-17", "NATURAL_GAS", 280.0, 280.0)
+    cached = eng._TICK_PRICE.get(42)
+    assert cached is not None
+    # Simulate process_user_tick market-key check.
+    today, market_key = "2026-07-17", "CRUDE_OIL"
+    if not (cached[0] == today and cached[1] == market_key):
+        eng._TICK_PRICE.pop(42, None)
+    assert 42 not in eng._TICK_PRICE
+
+
 def test_runtime_changed_detects_reference():
     before = {"phase": "WAIT_REF", "referencePrice": 0}
     after = {"phase": "WAIT_BREAKOUT", "referencePrice": 300.0}

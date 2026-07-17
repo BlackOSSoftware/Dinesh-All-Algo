@@ -290,15 +290,27 @@ def crossed(prev: float | None, cur: float, level: float) -> bool:
 
 
 def crossed_down(prev: float | None, low: float, level: float) -> bool:
+    """Entry-style cross: prev at/above level and price touched it (inclusive so a
+    prev seeded exactly on the level — e.g. after restart — still fires)."""
     if prev is None:
         return False
-    return prev > level and low <= level
+    return prev >= level and low <= level
 
 
 def crossed_up(prev: float | None, high: float, level: float) -> bool:
     if prev is None:
         return False
-    return prev < level and high >= level
+    return prev <= level and high >= level
+
+
+def touched_at_or_below(low: float, level: float) -> bool:
+    """Exit-style touch: price at/below level fires regardless of prev, so SL/TP
+    can never be skipped by a gap or an engine restart."""
+    return low <= level
+
+
+def touched_at_or_above(high: float, level: float) -> bool:
+    return high >= level
 
 
 def strike_from_index(index_level: float, strike_offset: float) -> float:
@@ -579,9 +591,11 @@ def process_bar(
         _update_cycle_sl_trail(oc, bar, p)
         sl_px = float(oc.sl_level)
 
+        # Touch-based so a gap past the level (or a restart with prev already
+        # beyond it) still exits — SL must never be skipped.
         hit_sl = (
-            (side == "CALL" and crossed_down(prev, lo, sl_px))
-            or (side == "PUT" and crossed_up(prev, hi, sl_px))
+            (side == "CALL" and touched_at_or_below(lo, sl_px))
+            or (side == "PUT" and touched_at_or_above(hi, sl_px))
         )
         if hit_sl:
             signals.append(
@@ -631,9 +645,10 @@ def process_bar(
                 oc.entries_filled += 1
 
         if not oc.avg_t1_done and oc.avg_lots > 0:
+            # Touch-based (guarded by avg_t1_done): gap past T1 still books profit.
             avg_t1_hit = (
-                (side == "CALL" and crossed_up(prev, hi, oc.t1_level_avg))
-                or (side == "PUT" and crossed_down(prev, lo, oc.t1_level_avg))
+                (side == "CALL" and touched_at_or_above(hi, oc.t1_level_avg))
+                or (side == "PUT" and touched_at_or_below(lo, oc.t1_level_avg))
             )
             if avg_t1_hit:
                 avg_close = oc.avg_lots
@@ -659,9 +674,10 @@ def process_bar(
                 oc.avg_t1_done = True
 
         if not oc.core_t1_done and oc.core_lots > 0:
+            # Touch-based (guarded by core_t1_done): gap past T1 still books profit.
             core_t1_hit = (
-                (side == "CALL" and crossed_up(prev, hi, oc.t1_level_core))
-                or (side == "PUT" and crossed_down(prev, lo, oc.t1_level_core))
+                (side == "CALL" and touched_at_or_above(hi, oc.t1_level_core))
+                or (side == "PUT" and touched_at_or_below(lo, oc.t1_level_core))
             )
             if core_t1_hit:
                 core_tp1 = min(tp1_close_lots(p), oc.core_lots)
@@ -699,7 +715,8 @@ def process_bar(
                 extreme = max(extreme, hi, px)
                 trail_tp = extreme - p.tp2_trail
                 oc.trail_extreme = extreme
-                tp2_hit = crossed_down(prev, lo, trail_tp)
+                # Touch-based: price at/below the trail level exits even on a gap.
+                tp2_hit = touched_at_or_below(lo, trail_tp)
                 if tp2_hit and extreme > trail_tp:
                     signals.append(
                         Signal(
@@ -736,7 +753,8 @@ def process_bar(
                 extreme = min(extreme, lo, px)
                 trail_tp = extreme + p.tp2_trail
                 oc.trail_extreme = extreme
-                tp2_hit = crossed_up(prev, hi, trail_tp)
+                # Touch-based: price at/above the trail level exits even on a gap.
+                tp2_hit = touched_at_or_above(hi, trail_tp)
                 if tp2_hit and extreme < trail_tp:
                     signals.append(
                         Signal(

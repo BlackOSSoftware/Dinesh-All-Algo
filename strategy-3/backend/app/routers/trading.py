@@ -387,13 +387,15 @@ def close_leg_manual(
             user_type=(settings.angel_user_type or "USER").strip(),
         )
         try:
+            from app.services.strategy3_trading_engine import _product_type_for
+
             raw = angel_orders.place_market_order(
                 exchange=(pos.exchange or "BFO").upper(),
                 tradingsymbol=pos.trading_symbol,
                 symboltoken=str(pos.symbol_token),
                 transaction_type="SELL",
                 quantity=qty,
-                product_type=(settings.angel_option_product_type or "CARRYFORWARD").upper(),
+                product_type=_product_type_for(tr.load_config_dict(db, user.id)),
                 timeout_sec=float(settings.angel_request_timeout_sec or 15.0),
                 **headers,
             )

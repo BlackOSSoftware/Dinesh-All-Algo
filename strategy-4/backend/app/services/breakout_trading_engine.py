@@ -35,7 +35,8 @@ LOG = logging.getLogger(__name__)
 _TASK: asyncio.Task | None = None
 _STOP = asyncio.Event()
 _REF_FETCH_AT: dict[str, float] = {}
-_TICK_PRICE: dict[int, tuple[str, float, float]] = {}
+# user_id -> (session_date, market_key, prev_price, last_price)
+_TICK_PRICE: dict[int, tuple[str, str, float, float]] = {}
 
 
 def _ist_now() -> datetime:
@@ -142,7 +143,26 @@ def _extract_order_ack(raw: Any) -> tuple[str, bool, str]:
 def _ensure_daily_session(cfg: dict[str, Any], runtime: dict[str, Any]) -> dict[str, Any]:
     today = _session_date()
     if str(runtime.get("sessionDate") or "") != today:
+        open_lots = int(_num(runtime.get("positionLots")))
+        phase = str(runtime.get("phase") or "")
+        if open_lots > 0 and phase in ("IN_TRADE", "REVERSE_TRADE") and runtime.get("side") in ("BUY", "SELL"):
+            # Open (carry-forward) trade across the date boundary: keep managing its
+            # TP/SL instead of wiping the runtime, which would orphan the broker
+            # position and let a second, unwanted entry arm on the new reference.
+            rt = copy.deepcopy(runtime)
+            rt["sessionDate"] = today
+            rt["carriedFromPrevDay"] = True
+            return rt
         return fresh_breakout_runtime(session_date=today)
+    # Carried trade finished: re-arm a fresh session for today (normal daily flow).
+    if (
+        bool(runtime.get("carriedFromPrevDay"))
+        and str(runtime.get("phase") or "") in ("DONE", "NO_TRADE")
+        and int(_num(runtime.get("positionLots"))) <= 0
+    ):
+        fresh = fresh_breakout_runtime(session_date=today)
+        fresh["realizedPnl"] = round(_num(runtime.get("realizedPnl")), 2)
+        return fresh
     return runtime
 
 
@@ -245,6 +265,30 @@ def _num(v: Any, default: float = 0.0) -> float:
         return default
 
 
+def _action_side(action: dict[str, Any]) -> str | None:
+    """Resolve BUY/SELL from the action payload. Never silently defaults to BUY."""
+    side = str(action.get("side") or "").strip().upper()
+    if side in ("BUY", "SELL"):
+        return side
+    act = str(action.get("action") or "").strip().upper()
+    if act.endswith("_BUY") or act.endswith("BUY"):
+        return "BUY"
+    if act.endswith("_SELL") or act.endswith("SELL"):
+        return "SELL"
+    return None
+
+
+def _broker_tx_for(action: dict[str, Any]) -> str | None:
+    """Entry uses the action side; exit uses the opposite. None if side is unknown."""
+    side = _action_side(action)
+    if side is None:
+        return None
+    act = str(action.get("action") or "")
+    if act.startswith("EXIT_"):
+        return "SELL" if side == "BUY" else "BUY"
+    return side
+
+
 def _sync_position(
     db,
     *,
@@ -257,7 +301,10 @@ def _sync_position(
     act = str(action.get("action") or "")
     lots = int(action.get("lots") or 0)
     fill = float(action.get("fillPrice") or 0)
-    side = str(action.get("side") or "BUY")
+    side = _action_side(action)
+    if side is None:
+        LOG.error("[BreakoutEngine] refusing to sync position with unknown side: %s", action)
+        return
 
     if act.startswith("INITIAL_") or act.startswith("REVERSE_"):
         leg = "REVERSE" if action.get("isReverse") else "MAIN"
@@ -314,7 +361,9 @@ def manual_close_position(db, user_id: int, leg_id: str) -> None:
         mark = entry
     qty = int(pos.quantity or 0)
     lots = int(pos.lots or 0)
-    side = (pos.side or "BUY").upper()
+    side = (pos.side or "").upper()
+    if side not in ("BUY", "SELL"):
+        raise ValueError(f"Position side is missing/invalid ({pos.side!r}) — cannot close safely")
     mode = (pos.trading_mode or "PAPER").upper()
     exit_px = round(mark, 2) if mark > 0 else entry
 
@@ -443,9 +492,14 @@ def process_user_tick(db, user_id: int) -> None:
 
     cached = _TICK_PRICE.get(user_id)
     today = _session_date()
-    if cached and cached[0] == today:
-        runtime["prevPrice"] = cached[1]
-        runtime["lastPrice"] = cached[2]
+    market_key = str(parsed.get("market") or "").upper()
+    # Only reuse prev/last price for the SAME market+day. Crossing instruments
+    # (e.g. NG ~280 vs Crude ~7600) with a stale span was the live wrong-side bug.
+    if cached and cached[0] == today and cached[1] == market_key:
+        runtime["prevPrice"] = cached[2]
+        runtime["lastPrice"] = cached[3]
+    else:
+        _TICK_PRICE.pop(user_id, None)
 
     runtime = _maybe_set_reference(db, user_id, cfg, runtime, parsed, instrument)
 
@@ -462,7 +516,12 @@ def process_user_tick(db, user_id: int) -> None:
 
     prev_runtime = copy.deepcopy(runtime)
     runtime, actions = process_price_tick(cfg, runtime, price)
-    _TICK_PRICE[user_id] = (today, float(runtime.get("prevPrice") or price), float(runtime.get("lastPrice") or price))
+    _TICK_PRICE[user_id] = (
+        today,
+        market_key,
+        float(runtime.get("prevPrice") or price),
+        float(runtime.get("lastPrice") or price),
+    )
 
     live_failed = False
     kept_actions: list[dict[str, Any]] = []
@@ -485,11 +544,20 @@ def process_user_tick(db, user_id: int) -> None:
                 live_failed = True
                 break
 
-            act_name = str(act.get("action") or "")
-            if act_name.startswith("EXIT_"):
-                tx = "SELL" if act.get("side") == "BUY" else "BUY"
-            else:
-                tx = str(act.get("side") or "BUY")
+            tx = _broker_tx_for(act)
+            if tx is None:
+                tr.append_trading_log(
+                    db,
+                    user_id=user_id,
+                    mode=mode,
+                    leg=str(act.get("side") or "-"),
+                    action="ORDER_REJECTED",
+                    symbol=instrument.tradingsymbol,
+                    status="REJECTED",
+                    message=f"Refused live order — unknown side for action {act.get('action')!r}"[:900],
+                )
+                live_failed = True
+                break
             try:
                 raw = angel_orders.place_order(
                     exchange=instrument.exchange,

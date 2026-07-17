@@ -18,7 +18,10 @@ console.log("[worker] Starting Strategy 3 API from", backend);
 
 const child = spawn(
   python,
-  ["-m", "uvicorn", "app.main:app", "--reload", "--host", "127.0.0.1", "--port", "8002"],
+  // --no-access-log: per-request lines otherwise flood the CMD window (frontend
+  // polls every second) and slowly hang the VPS console. Details still go to
+  // backend/instance/logs/backend.log (rotating).
+  ["-m", "uvicorn", "app.main:app", "--reload", "--host", "127.0.0.1", "--port", "8002", "--no-access-log"],
   {
     cwd: backend,
     stdio: "inherit",

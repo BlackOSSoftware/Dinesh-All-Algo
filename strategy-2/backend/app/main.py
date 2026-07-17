@@ -7,6 +7,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
 from app.config import settings, log_startup_config
+from app.log_setup import setup_logging
+
+setup_logging()
 from app.database import SessionLocal, engine
 from app.models import Base, StrategySettings, TradePosition, TradingLog, User
 from app.routers import angel as angel_router

@@ -35,6 +35,8 @@ from app.services.bfo_scrip_resolver import resolve_sensex_option
 from app.services.breakout_logic import (
     add_minutes_to_hhmm,
     build_trade_windows,
+    calc_stop_price,
+    calc_target_price,
     evaluate_option_setup,
     nearest_itm_ce_strike,
     nearest_itm_pe_strike,
@@ -270,12 +272,23 @@ def _save_runtime(db, user_id: int, cfg_raw: dict[str, Any], runtime: dict[str, 
 # Live order helpers
 
 
+def _product_type_for(cfg: dict[str, Any] | None) -> str:
+    """Angel product type from dashboard setting: MIS → INTRADAY, NRML → CARRYFORWARD."""
+    raw = str((cfg or {}).get("productType") or "").strip().upper()
+    if raw in ("MIS", "INTRADAY"):
+        return "INTRADAY"
+    if raw in ("NRML", "CARRYFORWARD"):
+        return "CARRYFORWARD"
+    return (settings.angel_option_product_type or "INTRADAY").upper()
+
+
 def _place_live_market(
     *,
     tradingsymbol: str,
     token: str,
     transaction_type: str,
     quantity: int,
+    product_type: str | None = None,
 ) -> tuple[bool, float, str, str]:
     """Place LIVE market order and await fill. Returns (filled, avg_price, order_id, message)."""
     try:
@@ -285,7 +298,7 @@ def _place_live_market(
             symboltoken=str(token),
             transaction_type=transaction_type.upper(),
             quantity=int(quantity),
-            product_type=(settings.angel_option_product_type or "INTRADAY").upper(),
+            product_type=(product_type or settings.angel_option_product_type or "INTRADAY").upper(),
             timeout_sec=float(settings.angel_request_timeout_sec or 15.0),
             **_angel_headers(),
         )
@@ -483,6 +496,7 @@ def _enter_leg(
             token=str(leg.get("token") or ""),
             transaction_type="BUY",
             quantity=qty,
+            product_type=_product_type_for(cfg),
         )
         if not filled:
             leg["state"] = "FAILED"
@@ -495,6 +509,14 @@ def _enter_leg(
             return
         if avg > 0:
             fill = avg
+
+    # Recalculate TP/SL from the actual fill so gaps/slippage keep the configured
+    # target and stop-loss percentages accurate.
+    if fill > 0:
+        target_pct = float(cfg.get("targetPercent") or 25.0)
+        stop_pct = float(cfg.get("stopLossPercent") or 30.0)
+        leg["tp"] = calc_target_price(fill, target_pct)
+        leg["sl"] = calc_stop_price(fill, stop_pct)
 
     pos = TradePosition(
         user_id=user_id,
@@ -540,6 +562,7 @@ def _exit_leg(
     pos: TradePosition,
     exit_px: float,
     reason: str,
+    cfg: dict[str, Any] | None = None,
 ) -> bool:
     qty = int(pos.quantity or 0)
     entry = float(pos.entry_price or 0)
@@ -551,6 +574,7 @@ def _exit_leg(
             token=str(pos.symbol_token or leg.get("token") or ""),
             transaction_type="SELL",
             quantity=qty,
+            product_type=_product_type_for(cfg),
         )
         if not filled:
             tr.append_trading_log(
@@ -725,7 +749,7 @@ def process_user_tick(db, user_id: int) -> None:
                     px = ltp if ltp > 0 else float(pos.entry_price or 0)
                     if _exit_leg(
                         db, user_id=user_id, mode=mode, leg=leg,
-                        pos=pos, exit_px=px, reason="MARKET_CLOSE",
+                        pos=pos, exit_px=px, reason="MARKET_CLOSE", cfg=cfg,
                     ):
                         changed = True
                     continue
@@ -736,14 +760,14 @@ def process_user_tick(db, user_id: int) -> None:
                 if tp > 0 and ltp >= tp:
                     if _exit_leg(
                         db, user_id=user_id, mode=mode, leg=leg,
-                        pos=pos, exit_px=ltp, reason="TARGET_HIT",
+                        pos=pos, exit_px=ltp, reason="TARGET_HIT", cfg=cfg,
                     ):
                         changed = True
                     continue
                 if sl > 0 and ltp <= sl:
                     if _exit_leg(
                         db, user_id=user_id, mode=mode, leg=leg,
-                        pos=pos, exit_px=ltp, reason="STOPLOSS_HIT",
+                        pos=pos, exit_px=ltp, reason="STOPLOSS_HIT", cfg=cfg,
                     ):
                         changed = True
 
