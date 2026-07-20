@@ -740,11 +740,14 @@ def tick_sensex_adaptive_trend_session(
     cfg: dict[str, Any],
     index_ltp: float,
     prev: float | None,
+    *,
+    live_bar: dict[str, Any] | None = None,
 ) -> None:
     uid = st_row.user_id
     p = TrendParams.from_config(cfg)
     base = _base_from_cfg(cfg)
     if base is None:
+        LOG.info("S1_SKIP user=%s reason=no_base cfg_keys=%s", uid, sorted(cfg.keys()))
         return
 
     now = _now_ist()
@@ -789,6 +792,7 @@ def tick_sensex_adaptive_trend_session(
         ):
             runtime.pop(k, None)
         _persist_runtime(db, uid, runtime)
+        LOG.info("S1_RESET user=%s reason=live_entry_rejected runtime_reset=true", uid)
 
     if str(cfg.get("slMode") or "auto") == "auto" and _past_or_at_session_end(now, auto_sq):
         while True:
@@ -809,49 +813,134 @@ def tick_sensex_adaptive_trend_session(
         runtime.clear()
         runtime.update({"flat_mode": None, "trail_extreme": None, "re_entry_count": 0})
         _persist_runtime(db, uid, runtime)
+        LOG.info("S1_SKIP user=%s reason=auto_square_off_done ltp=%.2f", uid, index_ltp)
         return
 
     if pos and _sob_is_sensex_pos(pos):
         if pos.trading_mode == "LIVE" and float(pos.entry_price or 0) <= 0:
             _persist_runtime(db, uid, runtime)
+            LOG.info("S1_SKIP user=%s reason=awaiting_live_entry_fill order_id=%s", uid, pos.order_id)
             return
         if str(pos.unique_order_id or "").upper().startswith("ADD:"):
             _persist_runtime(db, uid, runtime)
+            LOG.info("S1_SKIP user=%s reason=awaiting_live_add_fill order_id=%s", uid, pos.unique_order_id)
             return
 
     mode_u = (st_row.trading_mode or "PAPER").upper()
     if mode_u != "PAPER" and not in_win and pos is None:
         _persist_runtime(db, uid, runtime)
+        LOG.info("S1_SKIP user=%s reason=outside_window mode=%s now=%s start=%s end=%s", uid, mode_u, now.isoformat(), start_s, end_s)
         return
 
     if tr.leg_has_session_blocking_exit_today_ist(db, uid, LEG_SOB) and pos is None:
         _persist_runtime(db, uid, runtime)
+        LOG.info("S1_SKIP user=%s reason=session_blocked_after_exit", uid)
         return
 
     runtime_before = deepcopy(runtime)
     state = _state_from_runtime(runtime, base_price=float(base), pos=pos, p=p)
     session_end = _past_or_at_session_end(now, auto_sq)
+    prev_close = (
+        float(live_bar["prev_close"])
+        if live_bar is not None and live_bar.get("prev_close") is not None
+        else (float(prev) if prev is not None else float(base))
+    )
     bar = BarSlice(
         time=now.isoformat(),
-        open=index_ltp,
-        high=index_ltp,
-        low=index_ltp,
+        open=float(live_bar.get("open") or index_ltp) if live_bar is not None else index_ltp,
+        high=float(live_bar.get("high") or index_ltp) if live_bar is not None else index_ltp,
+        low=float(live_bar.get("low") or index_ltp) if live_bar is not None else index_ltp,
         close=index_ltp,
-        prev_close=float(prev) if prev is not None else float(base),
+        prev_close=prev_close,
+    )
+    LOG.info(
+        "S1_EVAL user=%s mode=%s ltp=%.2f base=%.2f prev_close=%.2f bar[o=%.2f h=%.2f l=%.2f c=%.2f] in_win=%s cycle=%s side=%s wait=%s re_count=%s pos_lots=%s",
+        uid,
+        mode_u,
+        index_ltp,
+        float(base),
+        float(prev_close),
+        float(bar.open),
+        float(bar.high),
+        float(bar.low),
+        float(bar.close),
+        in_win,
+        getattr(state.open_cycle, "cycle_id", None),
+        getattr(state.open_cycle, "side", None),
+        state.wait_reentry_side,
+        state.re_entry_count,
+        getattr(state.open_cycle, "lots", 0),
     )
     state, signals = process_bar(state, p, bar, session_end=session_end)
+    if signals:
+        LOG.info(
+            "S1_SIGNALS user=%s cycle=%s signals=%s",
+            uid,
+            getattr(state.open_cycle, "cycle_id", None),
+            [
+                {
+                    "kind": s.kind.value,
+                    "side": s.side,
+                    "price": round(float(s.price), 2),
+                    "first_entry": round(float(s.first_entry), 2),
+                    "lots": s.lots,
+                    "close_lots": s.close_lots,
+                    "reason": s.exit_reason,
+                    "cycle_id": s.cycle_id,
+                    "entry_kind": s.entry_kind.value,
+                }
+                for s in signals
+            ],
+        )
+    else:
+        LOG.info(
+            "S1_NO_SIGNAL user=%s call_trig=%.2f put_trig=%.2f cycle=%s side=%s",
+            uid,
+            float(base) + p.entry_trigger,
+            float(base) - p.entry_trigger,
+            getattr(state.open_cycle, "cycle_id", None),
+            getattr(state.open_cycle, "side", None),
+        )
 
     broker_ok = True
     for sig in signals:
         pos = tr.get_open_position_by_leg(db, uid, LEG_SOB)
+        LOG.info(
+            "S1_EXEC user=%s kind=%s side=%s price=%.2f lots=%s cycle=%s existing_pos=%s",
+            uid,
+            sig.kind.value,
+            sig.side,
+            float(sig.price),
+            sig.lots,
+            sig.cycle_id,
+            bool(pos),
+        )
         if not _execute_core_signal(db, st_row, cfg, p, sig, index_ltp, pos=pos):
             broker_ok = False
+            LOG.warning(
+                "S1_BROKER_REJECT user=%s kind=%s side=%s price=%.2f cycle=%s",
+                uid,
+                sig.kind.value,
+                sig.side,
+                float(sig.price),
+                sig.cycle_id,
+            )
             break
 
     if not broker_ok:
         # Rejected LIVE order: do not advance strategy runtime (prevents phantom SL/TP).
         _persist_runtime(db, uid, runtime_before)
+        LOG.info("S1_RUNTIME_ROLLBACK user=%s reason=broker_reject", uid)
         return
 
     runtime = _runtime_from_state(runtime, state)
     _persist_runtime(db, uid, runtime)
+    LOG.info(
+        "S1_RUNTIME user=%s cycle=%s side=%s wait=%s re_count=%s open=%s",
+        uid,
+        getattr(state.open_cycle, "cycle_id", None),
+        getattr(state.open_cycle, "side", None),
+        state.wait_reentry_side,
+        state.re_entry_count,
+        bool(state.open_cycle),
+    )

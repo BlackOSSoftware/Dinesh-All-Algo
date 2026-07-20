@@ -428,6 +428,7 @@ export function TradingDashboardProvider({ children }: { children: ReactNode }) 
 
 function useTradingDashboardState() {
   const pathname = usePathname();
+  const isDashboardPage = pathname === '/';
   const isBacktestPage = pathname === '/backtest';
   const { algoEnabled, setAlgoEnabled, legEntryMode, setLegEntryMode } = useAlgoRuntime();
   const [referencePrice, setReferencePrice] = useState<number>(0);
@@ -498,14 +499,17 @@ function useTradingDashboardState() {
   }, []);
 
   useEffect(() => {
-    if (isBacktestPage) return;
+    // Quote polling is only needed on the dashboard. Keeping it active on the
+    // Settings page caused constant context churn and made sidebar navigation
+    // feel hung for minutes on slower VPS machines.
+    if (isBacktestPage || !isDashboardPage) return;
     const first = window.setTimeout(() => void fetchAngel(), 0);
     const id = window.setInterval(() => void fetchAngel(), 1000);
     return () => {
       window.clearTimeout(first);
       window.clearInterval(id);
     };
-  }, [fetchAngel, isBacktestPage]);
+  }, [fetchAngel, isBacktestPage, isDashboardPage]);
 
   /** Live reference: prefer ltp/close/open from quote row (OHLC shapes vary). */
   useEffect(() => {
@@ -787,7 +791,9 @@ function useTradingDashboardState() {
   }, [bootDone, serverOnline]);
 
   useEffect(() => {
-    if (!bootDone || !serverOnline || isBacktestPage) return;
+    // Heavy dashboard polling must not run on Settings; it re-renders the whole
+    // provider tree every second and blocks route transitions.
+    if (!bootDone || !serverOnline || isBacktestPage || !isDashboardPage) return;
     const token = getStoredToken();
     if (!token) return;
     const headers = { Authorization: `Bearer ${token}` };
@@ -838,7 +844,7 @@ function useTradingDashboardState() {
       window.clearInterval(activeId);
       window.clearInterval(secondaryId);
     };
-  }, [bootDone, serverOnline, isBacktestPage]);
+  }, [bootDone, serverOnline, isBacktestPage, isDashboardPage]);
 
   const fetchStartBarClose = useCallback(async () => {
     const token = getStoredToken();

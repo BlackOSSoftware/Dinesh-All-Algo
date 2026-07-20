@@ -6,10 +6,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from copy import deepcopy
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.config import settings
 from app.database import SessionLocal
@@ -25,6 +28,56 @@ _stop = asyncio.Event()
 _prev_index_ltp: float | None = None
 _last_market_ok: bool | None = None
 _logged_engine_start: bool = False
+_live_bar_state: dict[str, Any] | None = None
+
+
+def _now_ist() -> datetime:
+    try:
+        return datetime.now(ZoneInfo("Asia/Kolkata"))
+    except ZoneInfoNotFoundError:
+        return datetime.now(timezone(timedelta(hours=5, minutes=30)))
+
+
+def _current_minute_key() -> str:
+    return _now_ist().strftime("%Y-%m-%d %H:%M")
+
+
+def _update_live_bar(index_ltp: float) -> dict[str, Any]:
+    """Build the evolving current-minute OHLC from observed live prices.
+
+    Backtest evaluates intrabar high/low touches on 1-minute candles. Real-time
+    previously used a flat bar (open=high=low=close=ltp), which could miss
+    trigger/TP/SL touches between sparse snapshots. This bridge keeps the same
+    `process_bar()` engine but feeds it the best available minute OHLC.
+    """
+    global _live_bar_state
+
+    minute = _current_minute_key()
+    px = float(index_ltp)
+    if _live_bar_state is None:
+        _live_bar_state = {
+            "minute": minute,
+            "open": px,
+            "high": px,
+            "low": px,
+            "close": px,
+            "prev_close": _prev_index_ltp if _prev_index_ltp is not None else None,
+        }
+    elif str(_live_bar_state.get("minute")) != minute:
+        prev_close = float(_live_bar_state.get("close") or px)
+        _live_bar_state = {
+            "minute": minute,
+            "open": px,
+            "high": px,
+            "low": px,
+            "close": px,
+            "prev_close": prev_close,
+        }
+    else:
+        _live_bar_state["high"] = max(float(_live_bar_state.get("high") or px), px)
+        _live_bar_state["low"] = min(float(_live_bar_state.get("low") or px), px)
+        _live_bar_state["close"] = px
+    return deepcopy(_live_bar_state)
 
 
 def _synthetic_option_mark(pos: TradePosition, index_ltp: float) -> float:
@@ -115,14 +168,23 @@ def manual_close_leg(db: Session, user_id: int, leg_id: str) -> None:
     )
 
 
-def _tick_session(db: Session, st_row: StrategySettings, cfg: dict[str, Any], index_ltp: float) -> None:
+def _tick_session(
+    db: Session,
+    st_row: StrategySettings,
+    cfg: dict[str, Any],
+    index_ltp: float,
+    *,
+    live_bar: dict[str, Any] | None = None,
+) -> None:
     global _prev_index_ltp
-    tick_sensex_adaptive_trend_session(db, st_row, cfg, index_ltp, _prev_index_ltp)
+    tick_sensex_adaptive_trend_session(db, st_row, cfg, index_ltp, _prev_index_ltp, live_bar=live_bar)
 
 
 def tick_once() -> None:
     global _prev_index_ltp, _last_market_ok, _logged_engine_start
-    ltp, _detail, ok = get_index_ltp_cached()
+    # Use a faster quote cadence for the trading engine than the dashboard/API.
+    # 1s snapshots were enough to miss short-lived trigger touches.
+    ltp, detail, ok = get_index_ltp_cached(ttl_sec=0.25)
     db = SessionLocal()
     try:
         rows = list(db.scalars(select(StrategySettings).where(StrategySettings.algo_running.is_(True))).all())
@@ -135,15 +197,35 @@ def tick_once() -> None:
         _last_market_ok = bool(ok and ltp is not None)
 
         if ltp is None or not ok:
+            if rows:
+                LOG.info("S1_MARKET_SKIP ok=%s ltp=%s detail=%s", ok, ltp, detail or "")
             return
 
         assert ltp is not None
         index_ltp = float(ltp)
+        live_bar = _update_live_bar(index_ltp)
+        LOG.info(
+            "S1_TICK ltp=%.2f prev=%s bar=%s",
+            index_ltp,
+            f"{_prev_index_ltp:.2f}" if _prev_index_ltp is not None else "None",
+            {
+                "minute": live_bar.get("minute"),
+                "open": round(float(live_bar.get("open") or index_ltp), 2),
+                "high": round(float(live_bar.get("high") or index_ltp), 2),
+                "low": round(float(live_bar.get("low") or index_ltp), 2),
+                "close": round(float(live_bar.get("close") or index_ltp), 2),
+                "prev_close": (
+                    round(float(live_bar["prev_close"]), 2)
+                    if live_bar.get("prev_close") is not None
+                    else None
+                ),
+            },
+        )
 
         for st in rows:
             cfg = tr.load_config_dict(db, st.user_id)
             try:
-                _tick_session(db, st, cfg, index_ltp)
+                _tick_session(db, st, cfg, index_ltp, live_bar=live_bar)
             except Exception as exc:  # noqa: BLE001
                 LOG.exception("User %s trading tick error", st.user_id)
                 tr.append_trading_log(
