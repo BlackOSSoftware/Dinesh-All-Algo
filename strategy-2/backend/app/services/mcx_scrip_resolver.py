@@ -322,8 +322,49 @@ def resolve_mcx_instrument_for_expiry(key: str, expiry_iso: str) -> dict[str, st
     return None
 
 
+def _today_midnight() -> datetime:
+    return datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def tradingsymbol_is_expired(tradingsymbol: str) -> bool:
+    """True when the futures contract expiry date is before today (IST calendar day)."""
+    exp = _expiry_from_symbol(tradingsymbol)
+    if exp is None:
+        return False
+    return exp < _today_midnight()
+
+
+def _payload_is_expired(payload: dict[str, str]) -> bool:
+    return tradingsymbol_is_expired(str(payload.get("tradingsymbol") or ""))
+
+
+def _clear_cache_entry(key: str) -> None:
+    cache = _load_disk_cache()
+    if key not in cache:
+        return
+    del cache[key]
+    _save_disk_cache(cache)
+
+
+def purge_expired_mcx_token_cache() -> list[str]:
+    """Drop disk-cached MCX tokens whose contract month has rolled off."""
+    cache = _load_disk_cache()
+    purged: list[str] = []
+    for key, entry in list(cache.items()):
+        if not isinstance(entry, dict):
+            continue
+        payload = {k: str(v) for k, v in entry.items() if not k.startswith("_") and v}
+        if payload.get("tradingsymbol") and _payload_is_expired(payload):
+            del cache[key]
+            purged.append(str(key))
+    if purged:
+        _save_disk_cache(cache)
+        LOG.info("Purged expired MCX token cache: %s", ", ".join(purged))
+    return purged
+
+
 def _pick_front_month(rows: list[dict[str, Any]], base_symbol: str, *, variant: str = "standard") -> dict[str, Any] | None:
-    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    today = _today_midnight()
     candidates: list[tuple[datetime, dict[str, Any]]] = []
     for row in rows:
         if not _is_front_future_row(row, base_symbol, variant=variant):
@@ -400,6 +441,9 @@ def _cached_entry(key: str) -> dict[str, str] | None:
         return None
     payload = {k: str(v) for k, v in entry.items() if not k.startswith("_") and v}
     if payload.get("token") and payload.get("tradingsymbol"):
+        if _payload_is_expired(payload):
+            _clear_cache_entry(key)
+            return None
         return payload
     return None
 
@@ -412,6 +456,9 @@ def _stale_cached_entry(key: str) -> dict[str, str] | None:
         return None
     payload = {k: str(v) for k, v in entry.items() if not k.startswith("_") and v}
     if payload.get("token") and payload.get("tradingsymbol"):
+        if _payload_is_expired(payload):
+            _clear_cache_entry(key)
+            return None
         return payload
     return None
 

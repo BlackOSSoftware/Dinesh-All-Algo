@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from app.config import BACKEND_ROOT, settings
 from app.services.angel_quote import post_market_quote, _truthy_status
 from app.services.mcx_instruments import McxInstrument, load_mcx_instruments
+from app.services.mcx_scrip_resolver import tradingsymbol_is_expired
 
 LOG = logging.getLogger(__name__)
 
@@ -358,7 +359,39 @@ def _fetch_all_mcx_quotes_locked() -> list[QuoteResult]:
             batch = _fetch_batch_quotes(configured)
             for inst in configured:
                 if inst.key not in batch:
-                    results.append(_quote_from_cache(inst.key, inst, error="No LTP in Angel response"))
+                    err = "No LTP in Angel response"
+                    if tradingsymbol_is_expired(inst.tradingsymbol):
+                        from app.services.mcx_scrip_resolver import resolve_mcx_instrument
+
+                        resolved = resolve_mcx_instrument(inst.key, allow_slow=True)
+                        if resolved and resolved.get("token"):
+                            try:
+                                retry_batch = _fetch_batch_quotes(
+                                    [
+                                        McxInstrument(
+                                            key=inst.key,
+                                            label=resolved.get("label") or inst.label,
+                                            exchange=resolved.get("exchange") or "MCX",
+                                            token=str(resolved.get("token") or ""),
+                                            tradingsymbol=str(resolved.get("tradingsymbol") or ""),
+                                            lotsize=max(1, int(resolved.get("lotsize") or inst.lotsize)),
+                                        )
+                                    ]
+                                )
+                                if inst.key in retry_batch:
+                                    price, price_type, source = retry_batch[inst.key]
+                                    built = _build_result(inst.key, inst, price, source, price_type)
+                                    _store_quote(inst.key, built.price, built.source, built.market_open, built.price_type)
+                                    results.append(built)
+                                    LOG.info(
+                                        "MCX %s re-resolved after expiry → %s",
+                                        inst.key,
+                                        resolved.get("tradingsymbol"),
+                                    )
+                                    continue
+                            except Exception as retry_exc:  # noqa: BLE001
+                                err = str(retry_exc)[:160]
+                    results.append(_quote_from_cache(inst.key, inst, error=err))
                     continue
                 price, price_type, source = batch[inst.key]
                 built = _build_result(inst.key, inst, price, source, price_type)

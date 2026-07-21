@@ -8,7 +8,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.config import settings
-from app.services.mcx_scrip_resolver import resolve_mcx_instrument, resolve_mcx_instrument_for_expiry
+from app.services.mcx_scrip_resolver import (
+    resolve_mcx_instrument,
+    resolve_mcx_instrument_for_expiry,
+    tradingsymbol_is_expired,
+)
 
 LOG = logging.getLogger(__name__)
 
@@ -123,6 +127,16 @@ def load_mcx_instruments() -> dict[str, McxInstrument]:
             tradingsymbol=str(row.get("tradingsymbol") or "").strip(),
             lotsize=max(1, int(row.get("lotsize") or 1)),
         )
+        if out[key].configured and tradingsymbol_is_expired(out[key].tradingsymbol):
+            stale = out[key]
+            out[key] = McxInstrument(
+                key=key,
+                label=stale.label,
+                exchange=stale.exchange,
+                token="",
+                tradingsymbol="",
+                lotsize=stale.lotsize,
+            )
     for d in DEFAULT_INSTRUMENTS:
         key = str(d["key"]).upper()
         if key not in out:
@@ -136,11 +150,21 @@ def load_mcx_instruments() -> dict[str, McxInstrument]:
             )
 
     for key, inst in list(out.items()):
-        if inst.configured:
+        expired_configured = inst.configured and tradingsymbol_is_expired(inst.tradingsymbol)
+        if inst.configured and not expired_configured:
             continue
-        # Disk/stale cache only on hot path — never block quotes on Angel/master downloads.
-        resolved = resolve_mcx_instrument(key, allow_slow=False)
+        # Disk/stale cache only on hot path — allow_slow when rolling off expired contracts.
+        resolved = resolve_mcx_instrument(key, allow_slow=expired_configured)
         if not resolved:
+            if expired_configured:
+                out[key] = McxInstrument(
+                    key=key,
+                    label=inst.label,
+                    exchange=inst.exchange,
+                    token="",
+                    tradingsymbol="",
+                    lotsize=inst.lotsize,
+                )
             continue
         out[key] = McxInstrument(
             key=key,

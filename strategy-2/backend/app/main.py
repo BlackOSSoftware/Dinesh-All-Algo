@@ -70,21 +70,13 @@ async def lifespan(_: FastAPI):
 
     def _startup_mcx_quote_check() -> None:
         try:
-            from app.services.mcx_quotes import ensure_angel_session_for_quotes, fetch_all_mcx_quotes
-
-            quotes = fetch_all_mcx_quotes()
-            live_count = sum(1 for q in quotes if q.source == "live" and q.price > 0)
-            if quotes and live_count == 0 and any(q.error and "token" in (q.error or "").lower() for q in quotes):
-                if ensure_angel_session_for_quotes(reason="startup_token_check"):
-                    quotes = fetch_all_mcx_quotes()
-                    live_count = sum(1 for q in quotes if q.source == "live" and q.price > 0)
-            LOG.info("MCX startup quotes: %d instruments, %d live", len(quotes), live_count)
-        except Exception as exc:  # noqa: BLE001
-            LOG.warning("MCX startup quote check failed: %s", exc)
-
-        try:
+            from app.services.mcx_quotes import clear_mcx_quote_cache, ensure_angel_session_for_quotes, fetch_all_mcx_quotes
             from app.services.mcx_instruments import load_mcx_instruments
-            from app.services.mcx_scrip_resolver import resolve_mcx_instrument
+            from app.services.mcx_scrip_resolver import purge_expired_mcx_token_cache, resolve_mcx_instrument
+
+            purged = purge_expired_mcx_token_cache()
+            if purged:
+                clear_mcx_quote_cache()
 
             for key in load_mcx_instruments():
                 resolved = resolve_mcx_instrument(key, allow_slow=True)
@@ -97,8 +89,17 @@ async def lifespan(_: FastAPI):
                     )
                 else:
                     LOG.warning("MCX warmup %s: token not resolved", key)
+
+            quotes = fetch_all_mcx_quotes()
+            live_count = sum(1 for q in quotes if q.source == "live" and q.price > 0)
+            if quotes and live_count == 0 and any(q.error and "token" in (q.error or "").lower() for q in quotes):
+                if ensure_angel_session_for_quotes(reason="startup_token_check"):
+                    clear_mcx_quote_cache()
+                    quotes = fetch_all_mcx_quotes()
+                    live_count = sum(1 for q in quotes if q.source == "live" and q.price > 0)
+            LOG.info("MCX startup quotes: %d instruments, %d live", len(quotes), live_count)
         except Exception as exc:  # noqa: BLE001
-            LOG.warning("MCX instrument resolve failed at startup: %s", exc)
+            LOG.warning("MCX startup quote check failed: %s", exc)
 
     threading.Thread(target=_startup_mcx_quote_check, name="mcx-startup-check", daemon=True).start()
 
