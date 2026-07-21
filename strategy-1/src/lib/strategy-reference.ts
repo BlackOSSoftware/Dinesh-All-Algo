@@ -115,6 +115,7 @@ export function buildCalculatedTradeRows(
   _adaptiveHigh: number | null,
   _adaptiveLow: number | null,
   liveIndex: number | null,
+  activeSide: "CALL" | "PUT" | "NONE" | "MIXED" = "NONE",
 ): CalculatedTradeRow[] {
   const { upperTrigger: upper, lowerTrigger: lower, basePrice: base } = levels;
   if (upper == null || lower == null || base == null) return [];
@@ -123,6 +124,13 @@ export function buildCalculatedTradeRows(
     if (liveIndex == null) return "Pending";
     if (side === "CALL") return liveIndex >= entry ? "Trigger reached" : "Waiting";
     return liveIndex <= entry ? "Trigger reached" : "Waiting";
+  };
+
+  /** Avg only fires on the open cycle's side after initial fill — never hard-label as active. */
+  const avgStatusAt = (entry: number, side: "CALL" | "PUT") => {
+    if (activeSide === "NONE" || activeSide === "MIXED") return "Waiting";
+    if (activeSide !== side) return "Waiting";
+    return statusAt(entry, side);
   };
 
   const planned = buildPlannedLevelsFromParams(base, {
@@ -182,9 +190,8 @@ export function buildCalculatedTradeRows(
     if (side === "PUT" && !params.putEnabled) continue;
 
     const isInitial = pl.type === "CALL_TRIGGER" || pl.type === "PUT_TRIGGER";
-    let status = statusAt(pl.level, side);
+    let status = isInitial ? statusAt(pl.level, side) : avgStatusAt(pl.level, side);
     if (isInitial && !params.firstEntryEnabled) status = "First entry disabled";
-    if (!isInitial) status = `Avg #${pl.type.split("_").pop()} · TP1 only`;
 
     rows.push({
       id: pl.type.toLowerCase(),

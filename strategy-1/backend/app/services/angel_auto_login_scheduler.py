@@ -1,8 +1,9 @@
 """
 Angel One SmartAPI — daily auto-login via scripts/angel_smartapi_login.py.
 
-- Runs at 00:30 server time (APScheduler cron) for full TOTP login.
-- Every 8h: renews JWT via ANGEL_REFRESH_TOKEN when set (no TOTP).
+- Runs at 00:30 Asia/Kolkata (APScheduler cron) for full TOTP login.
+- Runs at 08:59 Asia/Kolkata Mon–Fri for pre-market token generate / login.
+- Every 10 min: JWT health check / renew via ANGEL_REFRESH_TOKEN when set (no TOTP).
 - On success: updates ANGEL_JWT_TOKEN (+ optional ANGEL_REFRESH_TOKEN) in .env, runtime, clears caches.
 """
 
@@ -22,8 +23,10 @@ LOG = logging.getLogger(__name__)
 
 SCHED_PREFIX = "[Scheduler]"
 JOB_DAILY_ID = "angel_smartapi_daily_login"
+JOB_PREMARKET_ID = "angel_smartapi_premarket_login"
 JOB_RETRY_ID = "angel_smartapi_login_retry_once"
 JOB_REFRESH_ID = "angel_jwt_refresh_interval"
+IST = "Asia/Kolkata"
 
 _scheduler: Any = None
 
@@ -336,7 +339,7 @@ def _sync_refresh_token_job() -> None:
 
 
 def start_angel_auto_login_scheduler() -> None:
-    """Start APScheduler with daily 00:30 job. Safe to call once; replaces existing scheduler."""
+    """Start APScheduler with 00:30 daily + 08:59 Mon–Fri IST jobs. Safe to call once."""
     global _scheduler
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
     from apscheduler.triggers.cron import CronTrigger
@@ -354,6 +357,7 @@ def start_angel_auto_login_scheduler() -> None:
         return
 
     _scheduler = AsyncIOScheduler(
+        timezone=IST,
         job_defaults={
             "coalesce": True,
             "max_instances": 1,
@@ -364,10 +368,19 @@ def start_angel_auto_login_scheduler() -> None:
     async def _daily_async() -> None:
         await _async_login_job("cron_00_30", True)
 
+    async def _premarket_async() -> None:
+        await _async_login_job("cron_08_59_mon_fri", True)
+
     _scheduler.add_job(
         _daily_async,
-        CronTrigger(hour=0, minute=30),
+        CronTrigger(hour=0, minute=30, timezone=IST),
         id=JOB_DAILY_ID,
+        replace_existing=True,
+    )
+    _scheduler.add_job(
+        _premarket_async,
+        CronTrigger(hour=8, minute=59, day_of_week="mon-fri", timezone=IST),
+        id=JOB_PREMARKET_ID,
         replace_existing=True,
     )
     _scheduler.add_job(
@@ -377,7 +390,10 @@ def start_angel_auto_login_scheduler() -> None:
         replace_existing=True,
     )
     _scheduler.start()
-    LOG.info("%s Angel One auto-login scheduled for 00:30 daily; JWT health check every 10 min", SCHED_PREFIX)
+    LOG.info(
+        "%s Angel One auto-login: 00:30 daily IST + 08:59 Mon–Fri IST; JWT health check every 10 min",
+        SCHED_PREFIX,
+    )
 
 
 def stop_angel_auto_login_scheduler() -> None:

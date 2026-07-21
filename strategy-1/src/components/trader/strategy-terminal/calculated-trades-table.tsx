@@ -8,7 +8,12 @@ import { cn } from "@/components/ui";
 
 function statusBadge(status: string) {
   const s = status.toLowerCase();
-  if (s.includes("triggered") || s.includes("at/above") || s.includes("at/below"))
+  if (
+    s.includes("trigger reached") ||
+    s.includes("triggered") ||
+    s.includes("at/above") ||
+    s.includes("at/below")
+  )
     return "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400";
   if (s.includes("waiting") || s === "—")
     return "bg-[var(--surface-elevated)] text-[var(--text-muted)]";

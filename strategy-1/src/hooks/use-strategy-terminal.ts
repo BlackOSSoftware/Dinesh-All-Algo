@@ -144,8 +144,8 @@ export function useStrategyTerminal() {
   });
 
   const calculatedRows: CalculatedTradeRow[] = useMemo(
-    () => buildCalculatedTradeRows(levels, params, adaptiveHigh, adaptiveLow, liveIndex),
-    [levels, params, adaptiveHigh, adaptiveLow, liveIndex],
+    () => buildCalculatedTradeRows(levels, params, adaptiveHigh, adaptiveLow, liveIndex, activeSide),
+    [levels, params, adaptiveHigh, adaptiveLow, liveIndex, activeSide],
   );
 
   return {
