@@ -18,8 +18,9 @@ from app.config import settings
 from app.database import SessionLocal
 from app.models import StrategySettings, TradePosition
 from app.services import trading_repository as tr
-from app.services.market_ltp import get_index_ltp_cached
+from app.services.market_ltp import get_engine_tick_ltp, get_index_ltp_cached
 from app.services.sensex_adaptive_trend import tick_sensex_adaptive_trend_session
+from app.services.sensex_execution import enrich_bar_for_tick_cross, ts_ms
 
 LOG = logging.getLogger(__name__)
 
@@ -182,9 +183,7 @@ def _tick_session(
 
 def tick_once() -> None:
     global _prev_index_ltp, _last_market_ok, _logged_engine_start
-    # Use a faster quote cadence for the trading engine than the dashboard/API.
-    # 1s snapshots were enough to miss short-lived trigger touches.
-    ltp, detail, ok = get_index_ltp_cached(ttl_sec=0.25)
+    ltp, detail, ok, cache_prev, cache_hit = get_engine_tick_ltp(ttl_sec=0.85)
     db = SessionLocal()
     try:
         rows = list(db.scalars(select(StrategySettings).where(StrategySettings.algo_running.is_(True))).all())
@@ -192,22 +191,32 @@ def tick_once() -> None:
             LOG.info("Trading engine serving %d active strategy row(s)", len(rows))
             _logged_engine_start = True
 
-        # Market-data connect/lost transitions are tracked internally only
-        # (no MARKET_DATA_CONNECTED / MARKET_DATA_LOST rows in trading logs).
         _last_market_ok = bool(ok and ltp is not None)
 
         if ltp is None or not ok:
             if rows:
-                LOG.info("S1_MARKET_SKIP ok=%s ltp=%s detail=%s", ok, ltp, detail or "")
+                LOG.info(
+                    "S1_MARKET_SKIP ts=%s ok=%s ltp=%s detail=%s cache_hit=%s",
+                    ts_ms(),
+                    ok,
+                    ltp,
+                    detail or "",
+                    cache_hit,
+                )
             return
 
         assert ltp is not None
         index_ltp = float(ltp)
+        tick_prev = _prev_index_ltp if _prev_index_ltp is not None else cache_prev
         live_bar = _update_live_bar(index_ltp)
+        live_bar = enrich_bar_for_tick_cross(live_bar, ltp=index_ltp, prev_ltp=tick_prev)
         LOG.info(
-            "S1_TICK ltp=%.2f prev=%s bar=%s",
+            "S1_TICK ts=%s ltp=%.2f prev=%s cache_prev=%s cache_hit=%s bar=%s",
+            ts_ms(),
             index_ltp,
-            f"{_prev_index_ltp:.2f}" if _prev_index_ltp is not None else "None",
+            f"{tick_prev:.2f}" if tick_prev is not None else "None",
+            f"{float(cache_prev):.2f}" if cache_prev is not None else "None",
+            cache_hit,
             {
                 "minute": live_bar.get("minute"),
                 "open": round(float(live_bar.get("open") or index_ltp), 2),
@@ -237,7 +246,8 @@ def tick_once() -> None:
                     message=str(exc)[:900],
                 )
 
-        _prev_index_ltp = index_ltp
+        if _prev_index_ltp is None or abs(float(_prev_index_ltp) - index_ltp) > 1e-9:
+            _prev_index_ltp = index_ltp
     finally:
         db.close()
 
@@ -250,7 +260,7 @@ async def run_engine_loop() -> None:
         except Exception:  # noqa: BLE001
             LOG.exception("tick_once crashed")
         try:
-            await asyncio.wait_for(asyncio.sleep(0.02), timeout=1.0)
+            await asyncio.wait_for(asyncio.sleep(0.005), timeout=1.0)
         except asyncio.CancelledError:
             break
     LOG.info("Trading engine loop stopped")

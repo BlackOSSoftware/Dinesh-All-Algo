@@ -23,7 +23,6 @@ from app.deps import get_current_user
 from app.models import User
 from app.services.angel_candles import post_get_candle_data
 from app.services.angel_quote import post_market_quote, _truthy_status
-from app.services.sensex_quote import fetch_sensex_live_quote
 
 LOG = logging.getLogger(__name__)
 
@@ -141,10 +140,11 @@ def _parse_exchange_tokens(raw: str) -> dict[str, list[str]]:
 @router.get("/live-quote")
 def angel_live_quote(_user: User = Depends(get_current_user)):
     """
-    Cached live quote (LTP/OHLC/FULL per `ANGEL_QUOTE_MODE`).
-    Response includes normalized `fetched` / `unfetched` when Angel returns them.
+    Live quote shared with the trading engine cache (same Angel LTP, token heal).
+    Prefer in-memory shared cache so dashboard stays fast without double rate-limits.
     """
     from app.services.angel_jwt_refresh import reload_angel_tokens_from_env
+    from app.services.market_ltp import get_dashboard_quote
 
     reload_angel_tokens_from_env()
 
@@ -161,18 +161,16 @@ def angel_live_quote(_user: User = Depends(get_current_user)):
             detail='Set ANGEL_EXCHANGE_TOKENS JSON, e.g. {"BSE":["99919000"]} for SENSEX or {"NSE":["3045"]} for SBIN',
         )
 
-    mode = (settings.angel_quote_mode or "LTP").strip().upper()
-    if mode not in ("LTP", "OHLC", "FULL"):
-        mode = "LTP"
-
     now = time.monotonic()
     if _CACHE["payload"] is not None and now - float(_CACHE["t"]) < _CACHE_TTL_SEC:
         return _CACHE["payload"]
 
     try:
-        out = fetch_sensex_live_quote(exchange_tokens=exchange_tokens, mode=mode)
+        out = get_dashboard_quote()
         if settings.angel_debug:
-            out["raw"] = None
+            out = {**out, "raw": None}
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
     except Exception as e:  # noqa: BLE001
         LOG.exception("Angel quote unexpected error")
         raise HTTPException(status_code=502, detail=str(e)) from e

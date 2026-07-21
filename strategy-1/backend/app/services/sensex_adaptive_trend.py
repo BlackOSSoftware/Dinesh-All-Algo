@@ -51,6 +51,12 @@ from app.services.sensex_trend_core import (
     open_cycle_sl_level,
     tp1_level_for,
 )
+from app.services.sensex_execution import (
+    audit_trigger_levels,
+    execute_signals_immediate,
+    repair_orphan_execution_state,
+    ts_ms,
+)
 
 LOG = logging.getLogger(__name__)
 
@@ -97,6 +103,19 @@ def _place_buy(
     exch = (settings.angel_option_exchange or "BFO").upper()
     product = (settings.angel_option_product_type or "CARRYFORWARD").upper()
     syn_entry = max(5.0, min(5000.0, float(cfg.get("offset") or 45) * 0.1))
+
+    LOG.info(
+        "S1_PLACE_BUY user=%s ts=%s mode=%s side=%s index_ltp=%.2f trigger=%.2f strike=%.2f lots=%s qty=%s",
+        uid,
+        ts_ms(),
+        mode,
+        su,
+        float(index_ltp),
+        float(first_entry_index),
+        float(option_strike),
+        lots,
+        qty,
+    )
 
     if mode == "LIVE":
         resolved = resolve_bfo_option(option_strike, opt_side)
@@ -698,7 +717,15 @@ def _execute_core_signal(
         if pos is not None:
             if sig.kind == SignalKind.OPEN_AVERAGE and not str(pos.unique_order_id or "").upper().startswith("ADD:"):
                 return _place_add_lot(db, pos, cfg, p, index_ltp, add_lots=sig.lots)
-            return True
+            LOG.warning(
+                "S1_EXEC_BLOCK user=%s ts=%s kind=%s existing_pos_id=%s order_id=%s — refusing silent skip",
+                uid,
+                ts_ms(),
+                sig.kind.value,
+                pos.id,
+                pos.order_id,
+            )
+            return False
         return _open_initial(
             db,
             st_row,
@@ -756,6 +783,30 @@ def tick_sensex_adaptive_trend_session(
     auto_sq = str(cfg.get("autoSquareOffTime") or end_s)
     in_win = _in_trading_window(now, start_s, end_s)
     runtime = tr.load_strategy_runtime(cfg)
+    runtime = repair_orphan_execution_state(db, uid, runtime)
+
+    # Lock BASE for the IST trading day so mid-session referenceClose rewrites
+    # cannot move triggers under live price and skip entries forever.
+    today = now.strftime("%Y-%m-%d")
+    locked_base = runtime.get("session_base")
+    locked_date = str(runtime.get("session_base_date") or "")
+    try:
+        locked_f = float(locked_base) if locked_base is not None else None
+    except (TypeError, ValueError):
+        locked_f = None
+    if locked_date == today and locked_f is not None and locked_f >= 1000:
+        if abs(float(base) - locked_f) > 0.01:
+            LOG.info(
+                "S1_BASE_LOCKED user=%s cfg_base=%.2f using_session_base=%.2f",
+                uid,
+                float(base),
+                locked_f,
+            )
+        base = locked_f
+    else:
+        runtime["session_base"] = float(base)
+        runtime["session_base_date"] = today
+        _persist_runtime(db, uid, runtime)
 
     pos = tr.get_open_position_by_leg(db, uid, LEG_SOB)
     pending_reject_cleanup = bool(
@@ -811,7 +862,7 @@ def tick_sensex_adaptive_trend_session(
                     pass
             _close_sob(db, p2, "AUTO_EXIT", index_ltp)
         runtime.clear()
-        runtime.update({"flat_mode": None, "trail_extreme": None, "re_entry_count": 0})
+        runtime.update({"flat_mode": None, "trail_extreme": None, "re_entry_count": 0, "session_base": None})
         _persist_runtime(db, uid, runtime)
         LOG.info("S1_SKIP user=%s reason=auto_square_off_done ltp=%.2f", uid, index_ltp)
         return
@@ -853,9 +904,20 @@ def tick_sensex_adaptive_trend_session(
         close=index_ltp,
         prev_close=prev_close,
     )
+    audit_trigger_levels(
+        user_id=uid,
+        mode=mode_u,
+        base=float(base),
+        ltp=float(index_ltp),
+        prev_ltp=prev,
+        bar=live_bar or {},
+        p=p,
+        pos=pos,
+    )
     LOG.info(
-        "S1_EVAL user=%s mode=%s ltp=%.2f base=%.2f prev_close=%.2f bar[o=%.2f h=%.2f l=%.2f c=%.2f] in_win=%s cycle=%s side=%s wait=%s re_count=%s pos_lots=%s",
+        "S1_EVAL user=%s ts=%s mode=%s ltp=%.2f base=%.2f prev_close=%.2f bar[o=%.2f h=%.2f l=%.2f c=%.2f] in_win=%s cycle=%s side=%s wait=%s re_count=%s pos_lots=%s",
         uid,
+        ts_ms(),
         mode_u,
         index_ltp,
         float(base),
@@ -902,35 +964,20 @@ def tick_sensex_adaptive_trend_session(
             getattr(state.open_cycle, "side", None),
         )
 
-    broker_ok = True
-    for sig in signals:
-        pos = tr.get_open_position_by_leg(db, uid, LEG_SOB)
-        LOG.info(
-            "S1_EXEC user=%s kind=%s side=%s price=%.2f lots=%s cycle=%s existing_pos=%s",
-            uid,
-            sig.kind.value,
-            sig.side,
-            float(sig.price),
-            sig.lots,
-            sig.cycle_id,
-            bool(pos),
-        )
-        if not _execute_core_signal(db, st_row, cfg, p, sig, index_ltp, pos=pos):
-            broker_ok = False
-            LOG.warning(
-                "S1_BROKER_REJECT user=%s kind=%s side=%s price=%.2f cycle=%s",
-                uid,
-                sig.kind.value,
-                sig.side,
-                float(sig.price),
-                sig.cycle_id,
-            )
-            break
+    broker_ok, _pending_patch = execute_signals_immediate(
+        db,
+        st_row,
+        cfg,
+        p,
+        signals,
+        index_ltp,
+        execute_fn=_execute_core_signal,
+    )
 
     if not broker_ok:
-        # Rejected LIVE order: do not advance strategy runtime (prevents phantom SL/TP).
+        state = _state_from_runtime(runtime_before, base_price=float(base), pos=pos, p=p)
         _persist_runtime(db, uid, runtime_before)
-        LOG.info("S1_RUNTIME_ROLLBACK user=%s reason=broker_reject", uid)
+        LOG.info("S1_RUNTIME_ROLLBACK user=%s ts=%s reason=execution_failed", uid, ts_ms())
         return
 
     runtime = _runtime_from_state(runtime, state)

@@ -605,7 +605,10 @@ function useTradingDashboardState() {
         if (typeof cfg.startTime === 'string') setStartTime(cfg.startTime.slice(0, 5));
         if (typeof cfg.endTime === 'string') setEndTime(cfg.endTime.slice(0, 5));
         const rc = num(cfg.referenceClose);
-        if (rc != null && rc > 0) setReferenceClose(rc);
+        if (rc != null && rc > 0) {
+          setReferenceClose(rc);
+          lastStartBarCloseRef.current = rc;
+        }
         const pp = num(cfg.partialClosePercent);
         if (pp != null && pp > 0) setPartialClosePercent(Math.min(100, Math.round(pp)));
         const t1Lots = num(cfg.tp1ExitLots);
@@ -949,30 +952,15 @@ function useTradingDashboardState() {
     if (startBarCloseAnchor == null || !Number.isFinite(startBarCloseAnchor)) return;
     const prev = lastStartBarCloseRef.current;
     if (prev === startBarCloseAnchor) return;
+    // Freeze BASE once captured for the session. Mid-session start-bar revisions
+    // move PUT/CALL triggers under live LTP and the engine never sees a fresh cross.
+    if (prev != null && prev > 0) return;
 
     setReferenceClose(startBarCloseAnchor);
     lastStartBarCloseRef.current = startBarCloseAnchor;
 
-    if (prev === null) {
-      setCeStopLoss((x) => (x == null ? startBarCloseAnchor : x));
-      setPeStopLoss((x) => (x == null ? startBarCloseAnchor : x));
-      const d = defaultTargetArrays(
-        startBarCloseAnchor,
-        entryGap,
-        addGap,
-        numEntries,
-        target1Pts,
-        target2Pts
-      );
-      setCeT1((c) => (c.length === 0 ? d.ceT1 : c));
-      setCeT2((c) => (c.length === 0 ? d.ceT2 : c));
-      setPeT1((c) => (c.length === 0 ? d.peT1 : c));
-      setPeT2((c) => (c.length === 0 ? d.peT2 : c));
-      return;
-    }
-
-    setCeStopLoss(startBarCloseAnchor);
-    setPeStopLoss(startBarCloseAnchor);
+    setCeStopLoss((x) => (x == null ? startBarCloseAnchor : x));
+    setPeStopLoss((x) => (x == null ? startBarCloseAnchor : x));
     const d = defaultTargetArrays(
       startBarCloseAnchor,
       entryGap,
@@ -981,10 +969,10 @@ function useTradingDashboardState() {
       target1Pts,
       target2Pts
     );
-    setCeT1(d.ceT1);
-    setCeT2(d.ceT2);
-    setPeT1(d.peT1);
-    setPeT2(d.peT2);
+    setCeT1((c) => (c.length === 0 ? d.ceT1 : c));
+    setCeT2((c) => (c.length === 0 ? d.ceT2 : c));
+    setPeT1((c) => (c.length === 0 ? d.peT1 : c));
+    setPeT2((c) => (c.length === 0 ? d.peT2 : c));
   }, [startBarCloseAnchor, entryGap, addGap, numEntries, target1Pts, target2Pts]);
 
   const resetTargetsFromStructure = useCallback(
