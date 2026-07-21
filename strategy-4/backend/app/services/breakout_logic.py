@@ -239,10 +239,39 @@ def set_reference_from_candle(runtime: dict[str, Any], candle: dict[str, Any], p
     return rt
 
 
-def _pnl_delta(side: Side, entry: float, exit_px: float, lots: int) -> float:
-    if side == "BUY":
-        return (exit_px - entry) * lots
-    return (entry - exit_px) * lots
+def _contract_size(parsed: dict[str, Any]) -> int:
+    """MCX rupees per 1-point move per lot (instrument lotsize)."""
+    if parsed.get("contract_size") is not None:
+        try:
+            return max(1, int(parsed["contract_size"]))
+        except (TypeError, ValueError):
+            pass
+    override = parsed.get("lotSize") or parsed.get("lots")
+    market = str(parsed.get("market") or "CRUDE_OIL").upper()
+    try:
+        from app.services.mcx_instruments import DEFAULT_INSTRUMENTS
+
+        for row in DEFAULT_INSTRUMENTS:
+            if str(row.get("key") or "").upper() == market:
+                return max(1, int(row.get("lotsize") or 1))
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from app.services.mcx_instruments import get_instrument
+
+        inst = get_instrument(market)
+        return max(1, int(inst.lotsize)) if inst else 1
+    except Exception:  # noqa: BLE001
+        return 1
+
+
+def _enrich_parsed(parsed: dict[str, Any]) -> dict[str, Any]:
+    return {**parsed, "contract_size": _contract_size(parsed)}
+
+
+def _pnl_delta(side: Side, entry: float, exit_px: float, lots: int, *, contract_size: int = 1) -> float:
+    pts = (exit_px - entry) if side == "BUY" else (entry - exit_px)
+    return pts * lots * max(1, int(contract_size))
 
 
 def _bar_path(open_px: float, high: float, low: float, close: float) -> list[float]:
@@ -379,10 +408,11 @@ def _close_position(
     side = side  # type: Side
     entry = _num(rt.get("entryPrice"))
     lots = _int(rt.get("positionLots")) or parsed["lots"]
-    realized = _num(rt.get("realizedPnl")) + _pnl_delta(side, entry, exit_px, lots)
+    cs = _contract_size(parsed)
+    realized = _num(rt.get("realizedPnl")) + _pnl_delta(side, entry, exit_px, lots, contract_size=cs)
     is_reverse = bool(rt.get("isReverse"))
 
-    trade_pnl = round(_pnl_delta(side, entry, exit_px, lots), 2)
+    trade_pnl = round(_pnl_delta(side, entry, exit_px, lots, contract_size=cs), 2)
     actions.append(
         {
             "action": f"EXIT_{reason}",
@@ -687,7 +717,7 @@ def simulate_day(
     *,
     session_date: str,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
-    parsed = parse_strategy_config(cfg)
+    parsed = _enrich_parsed(parse_strategy_config(cfg))
     rt = fresh_breakout_runtime(session_date=session_date)
     events: list[dict[str, Any]] = []
     day_report: dict[str, Any] = {
@@ -966,9 +996,18 @@ def describe_breakout_next_action(
     return status_message or phase_u
 
 
+def _exit_fill_price(*, reason: str, tp: float, sl: float) -> float:
+    """Limit-style exit: fill at TP/SL level, not at the overshooting LTP."""
+    if reason == "SL" and sl > 0:
+        return sl
+    if reason == "TP" and tp > 0:
+        return tp
+    return 0.0
+
+
 def process_price_tick(cfg: dict[str, Any], runtime: dict[str, Any], price: float) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Live LTP tick — detect breakout / TP / SL crosses at market price."""
-    parsed = parse_strategy_config(cfg)
+    parsed = _enrich_parsed(parse_strategy_config(cfg))
     rt = deepcopy(runtime)
     actions: list[dict[str, Any]] = []
     if price <= 0:
@@ -1028,11 +1067,12 @@ def process_price_tick(cfg: dict[str, Any], runtime: dict[str, Any], price: floa
                 exit_reason = "TP"
         if exit_reason:
             allow_rev = exit_reason == "SL" and phase == "IN_TRADE"
+            fill_px = _exit_fill_price(reason=exit_reason, tp=tp, sl=sl) or round(price, 4)
             rt, exit_actions = _close_position(
                 rt=rt,
                 parsed=parsed,
                 reason=exit_reason,
-                exit_px=round(price, 4),
+                exit_px=round(fill_px, 4),
                 allow_reverse=allow_rev,
             )
             actions.extend(exit_actions)

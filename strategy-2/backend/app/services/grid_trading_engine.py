@@ -697,7 +697,7 @@ def process_user_tick(db, user_id: int) -> None:
     if not instrument:
         return
 
-    quote = get_quote_by_key(parsed["market"])
+    quote = get_quote_by_key(parsed["market"], engine=True)
     price = float(quote.price if quote else 0)
     if price <= 0:
         rt = load_runtime(cfg)
@@ -815,7 +815,7 @@ async def _engine_loop() -> None:
         except Exception as exc:  # noqa: BLE001
             LOG.exception("[GridEngine] loop error: %s", exc)
         try:
-            await asyncio.wait_for(_STOP.wait(), timeout=0.5)
+            await asyncio.wait_for(_STOP.wait(), timeout=0.2)
         except asyncio.TimeoutError:
             pass
     LOG.info("[GridEngine] stopped")

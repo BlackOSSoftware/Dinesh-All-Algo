@@ -19,7 +19,7 @@ DEFAULT_INSTRUMENTS: list[dict[str, Any]] = [
         "exchange": "MCX",
         "token": "",
         "tradingsymbol": "",
-        "lotsize": 10,
+        "lotsize": 100,
     },
     {
         "key": "NATURAL_GAS",

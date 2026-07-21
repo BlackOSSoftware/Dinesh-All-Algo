@@ -479,6 +479,36 @@ def validate_grid_trade_sequence(actions: list[dict[str, Any]], *, max_upper: in
     return errors
 
 
+def _touch_exit_crosses(
+    current_price: float,
+    levels: list[GridLevel],
+    level_states: dict[str, str],
+    *,
+    grid_gap: float,
+    invert_grid: bool,
+    max_upper: int,
+    max_lower: int,
+) -> list[tuple[GridLevel, CrossDir]]:
+    """Stale LTP parked on an exit level — fire exit without a price cross between polls."""
+    out: list[tuple[GridLevel, CrossDir]] = []
+    for level in levels:
+        if not ltp_matches_grid_level(current_price, level.price, grid_gap):
+            continue
+        if invert_grid:
+            if level.kind != "lower":
+                continue
+            if not _can_exit_inverted_lower(level.level_id, level_states):
+                continue
+            out.append((level, "down"))
+        else:
+            if level.kind != "upper":
+                continue
+            if not _can_exit_upper_level(level.level_id, level_states):
+                continue
+            out.append((level, "up"))
+    return out
+
+
 def _crossed_levels(prev_price: float, curr_price: float, levels: list[GridLevel]) -> list[tuple[GridLevel, CrossDir]]:
     if prev_price <= 0 or curr_price <= 0 or prev_price == curr_price:
         return []
@@ -1074,6 +1104,16 @@ def _process_single_price_step(
         rt["lastLevelId"] = "BASE"
 
     crosses = _crossed_levels(prev_price, current_price, levels)
+    if not crosses and position > 0 and base_entered:
+        crosses = _touch_exit_crosses(
+            current_price,
+            levels,
+            level_states,
+            grid_gap=parsed["grid_gap"],
+            invert_grid=invert_grid,
+            max_upper=max_upper,
+            max_lower=max_lower,
+        )
     crossed_up_ids = {lvl.level_id for lvl, d in crosses if d == "up"}
 
     for level, direction in crosses:

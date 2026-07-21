@@ -46,7 +46,7 @@ def test_scenario_a_buy_tp():
     ]
     rt, trades, _report = simulate_day(candles, _cfg(), session_date="2024-06-01")
     assert rt["phase"] == "DONE"
-    assert rt["realizedPnl"] == 4.0
+    assert rt["realizedPnl"] == 5000.0
     assert any(t["action"] == "INITIAL_BUY" for t in trades)
     assert any(t["action"] == "EXIT_TP" for t in trades)
 
@@ -63,7 +63,7 @@ def test_scenario_b_buy_sl_reverse_tp():
     assert any(t["action"] == "EXIT_SL" for t in trades)
     assert any(t["action"] == "REVERSE_SELL" for t in trades)
     assert any(t["action"] == "EXIT_TP" for t in trades)
-    assert rt["realizedPnl"] == 0.8  # (-0.8 + 1.0) * 4 lots
+    assert rt["realizedPnl"] == 1000.0  # (-0.8 + 1.0) * 4 lots * 1250 NG lotsize
 
 
 def test_sell_first_breakout():
@@ -89,7 +89,7 @@ def test_daily_report_fields():
     assert report["initialDirection"] == "BUY"
     assert report["result"] == "TP"
     assert len(report["roundTrips"]) == 1
-    assert report["roundTrips"][0]["tradePnl"] == 4.0
+    assert report["roundTrips"][0]["tradePnl"] == 5000.0
 
 
 def test_never_both_initial_directions():
@@ -236,7 +236,7 @@ def test_sell_trade_tp_hits_below_entry_with_profit():
     rt = _open_sell_rt()
     next_rt, actions = process_price_tick(cfg, rt, 298.5)
     assert [a["action"] for a in actions] == ["EXIT_TP"]
-    assert actions[0]["tradePnl"] == 4.0  # (299.5 - 298.5) * 4 lots
+    assert actions[0]["tradePnl"] == 5000.0  # (299.5 - 298.5) * 4 lots * 1250
     assert next_rt["phase"] == "DONE"
 
 
@@ -245,7 +245,7 @@ def test_sell_trade_sl_hits_above_entry_and_reverses_buy():
     rt = _open_sell_rt()
     next_rt, actions = process_price_tick(cfg, rt, 300.3)
     assert [a["action"] for a in actions] == ["EXIT_SL", "REVERSE_BUY"]
-    assert actions[0]["tradePnl"] == -3.2  # (299.5 - 300.3) * 4 lots
+    assert actions[0]["tradePnl"] == -4000.0  # (299.5 - 300.3) * 4 lots * 1250
     assert next_rt["side"] == "BUY"
     assert next_rt["phase"] == "REVERSE_TRADE"
 
@@ -296,10 +296,10 @@ def test_midnight_rollover_keeps_open_trade():
         assert fresh["positionLots"] == 0
 
         # Once the carried trade finishes, the same day re-arms a new session.
-        done = {**out, "phase": "DONE", "positionLots": 0, "side": None, "realizedPnl": 4.0}
+        done = {**out, "phase": "DONE", "positionLots": 0, "side": None, "realizedPnl": 5000.0}
         rearmed = eng._ensure_daily_session(_cfg(), done)
         assert rearmed["phase"] == "WAIT_REF"
-        assert rearmed["realizedPnl"] == 4.0
+        assert rearmed["realizedPnl"] == 5000.0
     finally:
         eng._session_date = original
 
@@ -337,6 +337,34 @@ def test_runtime_changed_detects_reference():
     before = {"phase": "WAIT_REF", "referencePrice": 0}
     after = {"phase": "WAIT_BREAKOUT", "referencePrice": 300.0}
     assert _runtime_changed(before, after)
+
+
+def test_live_tick_tp_exits_at_tp_level_not_overshoot_ltp():
+    """TP fill must be at the TP price (limit), not the overshooting live LTP."""
+    cfg = _cfg(market="CRUDE_OIL", takeProfit=15, stopLoss=10)
+    entry = 7963.0
+    tp, sl = compute_tp_sl("BUY", entry, 15, 10)
+    rt = {
+        "phase": "IN_TRADE",
+        "referencePrice": 7960.0,
+        "buyTrigger": 7960.5,
+        "sellTrigger": 7959.5,
+        "side": "BUY",
+        "entryPrice": entry,
+        "tpPrice": tp,
+        "slPrice": sl,
+        "isReverse": False,
+        "tradeCount": 1,
+        "positionLots": 4,
+        "realizedPnl": 0.0,
+        "prevPrice": 7975.0,
+        "lastPrice": 7975.0,
+    }
+    next_rt, actions = process_price_tick(cfg, rt, 7983.0)
+    assert [a["action"] for a in actions] == ["EXIT_TP"]
+    assert actions[0]["exitPrice"] == tp
+    assert actions[0]["fillPrice"] == tp
+    assert actions[0]["tradePnl"] == 6000.0  # (7978 - 7963) * 4 * 100
 
 
 def test_in_session_overnight_window():

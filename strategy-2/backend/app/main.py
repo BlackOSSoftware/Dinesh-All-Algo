@@ -84,15 +84,19 @@ async def lifespan(_: FastAPI):
 
         try:
             from app.services.mcx_instruments import load_mcx_instruments
+            from app.services.mcx_scrip_resolver import resolve_mcx_instrument
 
-            for key, inst in load_mcx_instruments().items():
-                LOG.info(
-                    "MCX %s token=%s symbol=%s configured=%s",
-                    key,
-                    inst.token or "-",
-                    inst.tradingsymbol or "-",
-                    inst.configured,
-                )
+            for key in load_mcx_instruments():
+                resolved = resolve_mcx_instrument(key, allow_slow=True)
+                if resolved:
+                    LOG.info(
+                        "MCX warmup %s token=%s symbol=%s",
+                        key,
+                        resolved.get("token") or "-",
+                        resolved.get("tradingsymbol") or "-",
+                    )
+                else:
+                    LOG.warning("MCX warmup %s: token not resolved", key)
         except Exception as exc:  # noqa: BLE001
             LOG.warning("MCX instrument resolve failed at startup: %s", exc)
 

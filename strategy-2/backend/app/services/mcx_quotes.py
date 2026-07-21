@@ -1,4 +1,4 @@
-﻿"""Fetch MCX LTP quotes via Angel SmartAPI (LTP-only, never OHLC close)."""
+"""Fetch MCX LTP quotes via Angel SmartAPI (LTP-only, never OHLC close)."""
 
 from __future__ import annotations
 
@@ -21,7 +21,8 @@ LOG = logging.getLogger(__name__)
 _CACHE: dict[str, tuple[float, float, bool, str, str]] = {}
 # One Angel batch call covers all MCX symbols; keep well under Angel's rate budget
 # (4 strategy backends share one Angel account).
-_CACHE_TTL_SEC = 1.5
+_CACHE_TTL_SEC = 0.85
+_ENGINE_CACHE_TTL_SEC = 0.35
 _LTP_DISK_PATH = BACKEND_ROOT / "instance" / "mcx_last_ltp.json"
 
 _LTP_KEYS = ("ltp", "LTP", "lastTradePrice", "lasttradeprice", "LastTradePrice", "lastPrice")
@@ -418,7 +419,24 @@ def fetch_instrument_ltp(instrument: McxInstrument) -> QuoteResult:
     return _quote_from_cache(instrument.key, instrument, error="Quote unavailable")
 
 
-def get_quote_by_key(key: str) -> QuoteResult | None:
+def get_quote_by_key(key: str, *, engine: bool = False) -> QuoteResult | None:
+    """Return MCX quote. engine=True uses a shorter cache TTL for the trading loop."""
+    if engine:
+        now = time.monotonic()
+        k = (key or "").upper()
+        cached = _CACHE.get(k)
+        if cached and (now - cached[1]) < _ENGINE_CACHE_TTL_SEC and cached[0] > 0:
+            inst = load_mcx_instruments().get(k)
+            if inst:
+                return QuoteResult(
+                    key=k,
+                    label=inst.label,
+                    price=cached[0],
+                    market_open=cached[2],
+                    source=cached[3],
+                    tradingsymbol=inst.tradingsymbol,
+                    price_type=cached[4] if len(cached) > 4 else "LTP",
+                )
     results = fetch_all_mcx_quotes()
     q = quote_from_results(results, key)
     if q:

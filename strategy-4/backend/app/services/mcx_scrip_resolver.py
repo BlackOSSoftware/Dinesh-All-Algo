@@ -103,7 +103,7 @@ def _row_to_payload(key: str, row: dict[str, Any]) -> dict[str, str]:
         "SILVER_MICRO": "Silver Micro",
     }
     default_lots = {
-        "CRUDE_OIL": "10",
+        "CRUDE_OIL": "100",
         "NATURAL_GAS": "1250",
         "SILVER_MICRO": "1",
     }
