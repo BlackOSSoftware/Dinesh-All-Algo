@@ -20,10 +20,11 @@ from app.services.mcx_scrip_resolver import tradingsymbol_is_expired
 LOG = logging.getLogger(__name__)
 
 _CACHE: dict[str, tuple[float, float, bool, str, str]] = {}
-# One Angel batch call covers all MCX symbols; keep well under Angel's rate budget
-# (4 strategy backends share one Angel account).
-_CACHE_TTL_SEC = 0.85
-_ENGINE_CACHE_TTL_SEC = 0.35
+# One Angel batch call covers all MCX symbols. Cross-process shared cache (S2+S4)
+# plus a global Angel gate keep us under Angel's ~1 req/s budget.
+_CACHE_TTL_SEC = 1.5
+_ENGINE_CACHE_TTL_SEC = 1.2
+_SOFT_HOLD_SEC = 4.0
 _LTP_DISK_PATH = BACKEND_ROOT / "instance" / "mcx_last_ltp.json"
 
 _LTP_KEYS = ("ltp", "LTP", "lastTradePrice", "lasttradeprice", "LastTradePrice", "lastPrice")
@@ -284,6 +285,76 @@ def _build_result(
     )
 
 
+def _results_from_soft_hold(instruments: list[McxInstrument], now: float) -> list[QuoteResult] | None:
+    """Keep showing last successful live quotes briefly during Angel cooldown."""
+    configured = [inst for inst in instruments if inst.configured]
+    if not configured:
+        return None
+    if not all(
+        (cached := _CACHE.get(inst.key))
+        and cached[0] > 0
+        and (now - cached[1]) < _SOFT_HOLD_SEC
+        for inst in configured
+    ):
+        return None
+    out: list[QuoteResult] = []
+    for inst in instruments:
+        if not inst.configured:
+            out.append(
+                _quote_from_cache(
+                    inst.key,
+                    inst,
+                    error="Could not resolve MCX token - check Angel login",
+                )
+            )
+            continue
+        c = _CACHE[inst.key]
+        src = c[3] if c[3] in ("live", "last") else "last"
+        out.append(
+            QuoteResult(
+                key=inst.key,
+                label=inst.label,
+                price=c[0],
+                market_open=c[2],
+                source=src,
+                tradingsymbol=inst.tradingsymbol,
+                price_type=c[4] if len(c) > 4 else "LTP",
+                error=None,
+            )
+        )
+    return out
+
+
+def _hydrate_from_shared(
+    instruments: list[McxInstrument],
+    shared: dict[str, dict[str, Any]],
+) -> list[QuoteResult] | None:
+    configured = [inst for inst in instruments if inst.configured]
+    if not configured:
+        return None
+    if not all(inst.key in shared for inst in configured):
+        return None
+    results: list[QuoteResult] = []
+    for inst in instruments:
+        if not inst.configured:
+            results.append(
+                _quote_from_cache(
+                    inst.key,
+                    inst,
+                    error="Could not resolve MCX token - check Angel login",
+                )
+            )
+            continue
+        row = shared[inst.key]
+        price = float(row.get("price") or 0)
+        price_type = str(row.get("price_type") or "LTP")
+        source = str(row.get("source") or "live")
+        built = _build_result(inst.key, inst, price, source, price_type)
+        _store_quote(inst.key, built.price, built.source, built.market_open, built.price_type)
+        results.append(built)
+    return results
+
+
 def _results_from_memory_cache(instruments: list[McxInstrument], now: float) -> list[QuoteResult] | None:
     configured = [inst for inst in instruments if inst.configured]
     if not configured:
@@ -315,6 +386,8 @@ def _fetch_all_mcx_quotes_locked() -> list[QuoteResult]:
     global _last_fetch_mono, _last_results, _last_runtime_jwt
 
     from app.services.angel_jwt_refresh import reload_angel_tokens_from_env
+    from app.services.angel_upstream_gate import angel_rate_limit_remaining
+    from app.services.mcx_shared_ltp import load_shared_mcx_batch, save_shared_mcx_batch
 
     changed = reload_angel_tokens_from_env()
     current_jwt = (settings.angel_jwt_token or "").strip()
@@ -332,6 +405,45 @@ def _fetch_all_mcx_quotes_locked() -> list[QuoteResult]:
 
     if _last_results and (now - _last_fetch_mono) < _CACHE_TTL_SEC:
         return list(_last_results)
+
+    # Prefer sibling strategy's fresh Angel batch before another upstream call.
+    shared = load_shared_mcx_batch(max_age_sec=_CACHE_TTL_SEC)
+    if shared:
+        hydrated = _hydrate_from_shared(instruments, shared)
+        if hydrated is not None:
+            LOG.debug("MCX quotes served from shared cross-process cache")
+            _last_results = hydrated
+            _last_fetch_mono = now
+            return hydrated
+
+    # During rate-limit cooldown, soft-hold last live prices (no Angel call, no banner).
+    if angel_rate_limit_remaining() > 0:
+        soft = _results_from_soft_hold(instruments, now)
+        if soft is not None:
+            _last_results = soft
+            _last_fetch_mono = now
+            return soft
+        shared_any = load_shared_mcx_batch(max_age_sec=30.0)
+        if shared_any:
+            hydrated = _hydrate_from_shared(instruments, shared_any)
+            if hydrated is not None:
+                # Age > TTL → mark as last so UI is honest, but omit rate-limit error spam.
+                marked = [
+                    QuoteResult(
+                        key=r.key,
+                        label=r.label,
+                        price=r.price,
+                        market_open=r.market_open,
+                        source="last" if r.price > 0 else r.source,
+                        tradingsymbol=r.tradingsymbol,
+                        price_type=r.price_type,
+                        error=None,
+                    )
+                    for r in hydrated
+                ]
+                _last_results = marked
+                _last_fetch_mono = now
+                return marked
 
     results: list[QuoteResult] = []
     configured = [inst for inst in instruments if inst.configured]
@@ -357,6 +469,7 @@ def _fetch_all_mcx_quotes_locked() -> list[QuoteResult]:
     if configured:
         try:
             batch = _fetch_batch_quotes(configured)
+            shared_payload: dict[str, dict[str, Any]] = {}
             for inst in configured:
                 if inst.key not in batch:
                     err = "No LTP in Angel response"
@@ -383,6 +496,13 @@ def _fetch_all_mcx_quotes_locked() -> list[QuoteResult]:
                                     built = _build_result(inst.key, inst, price, source, price_type)
                                     _store_quote(inst.key, built.price, built.source, built.market_open, built.price_type)
                                     results.append(built)
+                                    shared_payload[inst.key] = {
+                                        "price": built.price,
+                                        "price_type": built.price_type,
+                                        "source": "live",
+                                        "tradingsymbol": inst.tradingsymbol,
+                                        "market_open": built.market_open,
+                                    }
                                     LOG.info(
                                         "MCX %s re-resolved after expiry → %s",
                                         inst.key,
@@ -397,17 +517,39 @@ def _fetch_all_mcx_quotes_locked() -> list[QuoteResult]:
                 built = _build_result(inst.key, inst, price, source, price_type)
                 _store_quote(inst.key, built.price, built.source, built.market_open, built.price_type)
                 results.append(built)
+                shared_payload[inst.key] = {
+                    "price": built.price,
+                    "price_type": built.price_type,
+                    "source": "live",
+                    "tradingsymbol": inst.tradingsymbol,
+                    "market_open": built.market_open,
+                }
                 LOG.debug("MCX %s %s %s=%.2f", inst.key, inst.tradingsymbol, price_type, price)
+            if shared_payload:
+                save_shared_mcx_batch(shared_payload)
         except Exception as exc:  # noqa: BLE001
             LOG.warning("MCX batch quote failed: %s", exc)
             err_text = str(exc)
-            if "access rate" in err_text.lower() or "exceeding" in err_text.lower():
-                # Rate limit is transient and NOT a token problem — show last price
-                # without tripping the Generate Token banner.
-                err_text = "Angel rate limit — showing last price, retrying"
-            for inst in configured:
-                cached_row = _quote_from_cache(inst.key, inst, error=err_text[:160])
-                results.append(cached_row)
+            rate_hit = (
+                "access rate" in err_text.lower()
+                or "exceeding" in err_text.lower()
+                or "cooldown" in err_text.lower()
+                or "backoff" in err_text.lower()
+            )
+            if rate_hit:
+                soft = _results_from_soft_hold(instruments, time.monotonic())
+                if soft is not None:
+                    order = {inst.key: i for i, inst in enumerate(instruments)}
+                    soft.sort(key=lambda r: order.get(r.key, 999))
+                    _last_results = soft
+                    _last_fetch_mono = now
+                    return soft
+                # Transient — show last price WITHOUT rate-limit banner spam.
+                for inst in configured:
+                    results.append(_quote_from_cache(inst.key, inst, error=None))
+            else:
+                for inst in configured:
+                    results.append(_quote_from_cache(inst.key, inst, error=err_text[:160]))
 
     order = {inst.key: i for i, inst in enumerate(instruments)}
     results.sort(key=lambda r: order.get(r.key, 999))

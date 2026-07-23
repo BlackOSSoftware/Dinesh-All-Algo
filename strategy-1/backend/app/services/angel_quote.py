@@ -63,12 +63,26 @@ def post_market_quote(
     POST JSON body { mode, exchangeTokens } to Angel quote endpoint.
     Returns parsed JSON dict (raises on non-JSON or HTTP error after logging body).
 
-    Uses a process-wide upstream gate + one retry on 403 (token refresh or rate backoff).
+    Uses a cross-process upstream gate + token retry on 403; rate-limits use shared backoff (no hammer retry).
     """
     from app.config import settings
-    from app.services.angel_upstream_gate import acquire_angel_upstream_slot
+    from app.services.angel_upstream_gate import (
+        AngelUpstreamBusy,
+        acquire_angel_upstream_slot,
+        angel_rate_limit_remaining,
+        clear_angel_rate_limit,
+        note_angel_rate_limit,
+    )
 
-    acquire_angel_upstream_slot()
+    # Serve callers' caches instead of hammering Angel while cooldown is active.
+    remaining = angel_rate_limit_remaining()
+    if remaining > 0 and _retry_depth == 0:
+        raise RuntimeError(f"Angel access rate cooldown ({remaining:.1f}s remaining)")
+
+    try:
+        acquire_angel_upstream_slot()
+    except AngelUpstreamBusy as busy:
+        raise RuntimeError(str(busy)) from busy
 
     body = {"mode": mode.upper(), "exchangeTokens": exchange_tokens}
     raw = json.dumps(body).encode("utf-8")
@@ -88,7 +102,9 @@ def post_market_quote(
     try:
         with urllib.request.urlopen(req, timeout=timeout_sec, context=ctx) as resp:
             text = resp.read().decode("utf-8", errors="replace")
-            return json.loads(text)
+            payload = json.loads(text)
+            clear_angel_rate_limit()
+            return payload
     except urllib.error.HTTPError as e:
         try:
             err_body = e.read().decode("utf-8", errors="replace")
@@ -123,20 +139,12 @@ def post_market_quote(
                         _retry_depth=_retry_depth + 1,
                     )
             if _angel_403_is_rate(err_body):
-                time.sleep(1.15)
-                return post_market_quote(
-                    api_key=api_key,
-                    jwt_token=jwt_token,
-                    source_id=source_id,
-                    client_local_ip=client_local_ip,
-                    client_public_ip=client_public_ip,
-                    mac_address=mac_address,
-                    user_type=user_type,
-                    mode=mode,
-                    exchange_tokens=exchange_tokens,
-                    timeout_sec=timeout_sec,
-                    _retry_depth=_retry_depth + 1,
-                )
+                # Do NOT immediate-retry — that multiplies rate-limit pressure.
+                # Shared exponential backoff; callers serve memory/disk LTP.
+                wait = note_angel_rate_limit(detail=err_body[:200])
+                raise RuntimeError(
+                    f"Angel access rate exceeded — backoff {wait:.1f}s"
+                ) from e
 
         raise RuntimeError(f"Angel HTTP {e.code}: {err_body[:500]}") from e
     except urllib.error.URLError as e:

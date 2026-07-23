@@ -690,7 +690,7 @@ async def _engine_loop() -> None:
         except Exception as exc:  # noqa: BLE001
             LOG.exception("[BreakoutEngine] loop error: %s", exc)
         try:
-            await asyncio.wait_for(_STOP.wait(), timeout=0.05)
+            await asyncio.wait_for(_STOP.wait(), timeout=0.25)
         except asyncio.TimeoutError:
             pass
     LOG.info("[BreakoutEngine] stopped")

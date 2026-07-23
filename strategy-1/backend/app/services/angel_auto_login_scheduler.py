@@ -3,7 +3,7 @@ Angel One SmartAPI — daily auto-login via scripts/angel_smartapi_login.py.
 
 - Runs at 00:30 Asia/Kolkata (APScheduler cron) for full TOTP login.
 - Runs at 08:59 Asia/Kolkata Mon–Fri for pre-market token generate / login.
-- Every 10 min: JWT health check / renew via ANGEL_REFRESH_TOKEN when set (no TOTP).
+- Every 20 min: JWT health check / renew via ANGEL_REFRESH_TOKEN when set (no TOTP).
 - On success: updates ANGEL_JWT_TOKEN (+ optional ANGEL_REFRESH_TOKEN) in .env, runtime, clears caches.
 """
 
@@ -385,13 +385,13 @@ def start_angel_auto_login_scheduler() -> None:
     )
     _scheduler.add_job(
         _async_refresh_token_job,
-        IntervalTrigger(minutes=10),
+        IntervalTrigger(minutes=20),
         id=JOB_REFRESH_ID,
         replace_existing=True,
     )
     _scheduler.start()
     LOG.info(
-        "%s Angel One auto-login: 00:30 daily IST + 08:59 Mon–Fri IST; JWT health check every 10 min",
+        "%s Angel One auto-login: 00:30 daily IST + 08:59 Mon–Fri IST; JWT health check every 20 min",
         SCHED_PREFIX,
     )
 

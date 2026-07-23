@@ -160,6 +160,12 @@ def try_refresh_angel_jwt_via_refresh_token(*, reason: str, force: bool = False)
     if not force and now - _last_refresh_attempt_mono < _REFRESH_DEBOUNCE_SEC:
         LOG.debug("Angel JWT refresh debounced (%s)", reason)
         return False
+    from app.services.angel_upstream_gate import recent_angel_jwt_refresh
+
+    if not force and recent_angel_jwt_refresh(max_age_sec=_REFRESH_DEBOUNCE_SEC):
+        LOG.debug("Angel JWT refresh skipped — recent shared refresh (%s)", reason)
+        reload_angel_tokens_from_env()
+        return bool((settings.angel_jwt_token or "").strip())
     _last_refresh_attempt_mono = now
 
     acquire_angel_upstream_slot()
@@ -211,6 +217,10 @@ def try_refresh_angel_jwt_via_refresh_token(*, reason: str, force: bool = False)
         pass
 
     LOG.info("Angel JWT refreshed via refresh token (%s); len(jwt)=%d", reason, len(jwt_raw))
+    from app.services.angel_upstream_gate import note_angel_jwt_refreshed, note_angel_jwt_validated
+
+    note_angel_jwt_refreshed(reason=reason)
+    note_angel_jwt_validated()
     return True
 
 
@@ -241,14 +251,22 @@ def validate_angel_session() -> tuple[bool, str]:
     Verify the current JWT with a real quote call (SENSEX index token — works on any session).
     Returns (usable, detail). Only a token-style rejection marks the session unusable;
     rate limits / network errors are treated as usable so we don't relogin needlessly.
+
+    Skips the quote probe when another strategy backend validated recently (shared stamp),
+    so 4 schedulers do not burn Angel's rate budget on health checks.
     """
     from app.config import settings
     from app.services.angel_quote import post_market_quote, _truthy_status
+    from app.services.angel_upstream_gate import note_angel_jwt_validated, recent_angel_jwt_validated
 
     api_key = (settings.angel_api_key or "").strip()
     jwt = (settings.angel_jwt_token or "").strip()
     if not api_key or not jwt:
         return False, "ANGEL_API_KEY or ANGEL_JWT_TOKEN missing"
+
+    if recent_angel_jwt_validated(max_age_sec=480.0):
+        LOG.debug("Angel JWT validate skipped — recent shared validation stamp")
+        return True, "ok (shared recent validate)"
 
     try:
         raw = post_market_quote(
@@ -271,6 +289,7 @@ def validate_angel_session() -> tuple[bool, str]:
 
     msg = str(raw.get("message") or raw.get("Message") or "") if isinstance(raw, dict) else ""
     if _truthy_status(raw):
+        note_angel_jwt_validated()
         return True, "ok"
     if _is_token_error_text(msg):
         return False, msg[:300]

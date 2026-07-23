@@ -83,6 +83,15 @@ def get_index_ltp_cached(ttl_sec: float = 1.0) -> tuple[float | None, str | None
         _CACHE.update({"t": now, "ltp": None, "detail": "Angel not configured", "ok": False})
         return None, "Angel not configured", False
 
+    from app.services.sensex_shared_ltp import load_shared_sensex_ltp, save_shared_sensex_ltp
+
+    shared = load_shared_sensex_ltp(max_age_sec=max(ttl_sec, 1.25))
+    if shared:
+        ltp_s, _payload = shared
+        _CACHE.update({"t": now, "ltp": ltp_s, "detail": "shared cross-process LTP", "ok": True})
+        LOG.debug("SENSEX LTP from shared cache=%.2f", ltp_s)
+        return float(ltp_s), "shared cross-process LTP", True
+
     exchange_tokens = _parse_exchange_tokens(settings.angel_exchange_tokens)
     if not exchange_tokens:
         _CACHE.update({"t": now, "ltp": None, "detail": "ANGEL_EXCHANGE_TOKENS empty", "ok": False})
@@ -103,10 +112,17 @@ def get_index_ltp_cached(ttl_sec: float = 1.0) -> tuple[float | None, str | None
             user_type=(settings.angel_user_type or "USER").strip(),
             mode=mode,
             exchange_tokens=exchange_tokens,
-        timeout_sec=min(float(settings.angel_request_timeout_sec or 5.0), 5.0),
+            timeout_sec=min(float(settings.angel_request_timeout_sec or 5.0), 5.0),
         )
     except RuntimeError as e:
         LOG.warning("market_ltp quote failed: %s", e)
+        shared = load_shared_sensex_ltp(max_age_sec=4.0)
+        if shared:
+            ltp_s, _payload = shared
+            _CACHE.update({"t": now, "ltp": ltp_s, "detail": "shared hold", "ok": True})
+            return float(ltp_s), "shared hold", True
+        if _CACHE.get("ltp") is not None and bool(_CACHE.get("ok")):
+            return float(_CACHE["ltp"]), str(_CACHE["detail"] or ""), True
         _CACHE.update({"t": now, "ltp": None, "detail": str(e), "ok": False})
         return None, str(e), False
 
@@ -122,8 +138,18 @@ def get_index_ltp_cached(ttl_sec: float = 1.0) -> tuple[float | None, str | None
     row = _pick_row(fetched)
     ltp = _ltp_from_row(row)
     detail = msg or ("" if ltp else "No LTP in quote response")
-    _CACHE.update({"t": now, "ltp": ltp, "detail": detail, "ok": ok and ltp is not None})
-    return ltp, detail, bool(ok and ltp is not None)
+    market_ok = bool(ok and ltp is not None)
+    _CACHE.update({"t": now, "ltp": ltp, "detail": detail, "ok": market_ok})
+    if market_ok and ltp is not None:
+        save_shared_sensex_ltp(
+            float(ltp),
+            {
+                "quote_source": "live",
+                "angel_ok": True,
+                "fetched": [row] if row else [{"ltp": ltp}],
+            },
+        )
+    return ltp, detail, market_ok
 
 
 def clear_market_ltp_cache() -> None:

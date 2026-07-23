@@ -182,8 +182,22 @@ def fetch_sensex_live_quote(*, exchange_tokens: dict[str, list[str]], mode: str)
     Attempts Angel token recovery once on invalid token.
     """
     from app.services.angel_jwt_refresh import reload_angel_tokens_from_env
+    from app.services.sensex_shared_ltp import load_shared_sensex_ltp, save_shared_sensex_ltp
 
     reload_angel_tokens_from_env()
+
+    shared = load_shared_sensex_ltp(max_age_sec=1.25)
+    if shared:
+        ltp_s, payload = shared
+        LOG.debug("SENSEX quote served from shared cache=%.2f", ltp_s)
+        if isinstance(payload, dict) and payload.get("fetched"):
+            return {
+                **payload,
+                "quote_source": "live",
+                "angel_ok": True,
+                "as_of": time.time(),
+                "token_expired": False,
+            }
 
     primary_mode = mode if mode in ("LTP", "OHLC", "FULL") else "LTP"
     modes_to_try = [primary_mode]
@@ -249,6 +263,21 @@ def fetch_sensex_live_quote(*, exchange_tokens: dict[str, list[str]], mode: str)
 
     live_quote = price is not None and quote_source == "live" and ok
     angel_ok = live_quote
+    if price is not None and live_quote:
+        save_shared_sensex_ltp(
+            float(price),
+            {
+                "angel_ok": True,
+                "angel_message": msg,
+                "mode": primary_mode,
+                "fetched": fetched,
+                "unfetched": unfetched,
+                "market_open": session_open,
+                "price_type": price_type,
+                "quote_source": "live",
+                "token_expired": False,
+            },
+        )
     if price is None and not msg:
         msg = "No SENSEX price in Angel response"
     # Flag stale quotes during BSE hours so the UI can show Generate Token.

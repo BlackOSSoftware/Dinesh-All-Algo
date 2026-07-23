@@ -45,7 +45,7 @@ from app.services.breakout_logic import (
     validate_expiry_session_premium,
 )
 from app.services.sensex_expiry import get_expiry_info, is_sensex_expiry_date
-from app.services.sensex_quote import fetch_sensex_live_quote, settings_parsed_tokens
+from app.services.sensex_quote import settings_parsed_tokens
 
 LOG = logging.getLogger(__name__)
 
@@ -131,25 +131,12 @@ def fetch_bfo_ltps(tokens: list[str]) -> dict[str, float]:
 
 
 def _sensex_ltp() -> float:
-    try:
-        raw = fetch_sensex_live_quote(
-            exchange_tokens=settings_parsed_tokens(),
-            mode=(settings.angel_quote_mode or "LTP").upper(),
-        )
-    except Exception as exc:  # noqa: BLE001
-        LOG.warning("[S3Engine] SENSEX quote failed: %s", exc)
-        return 0.0
-    fetched = raw.get("fetched") if isinstance(raw.get("fetched"), list) else []
-    row = fetched[0] if fetched and isinstance(fetched[0], dict) else {}
-    if str(raw.get("quote_source") or "") != "live":
-        return 0.0
-    for key in ("ltp", "Ltp"):
-        try:
-            val = float(row.get(key) or 0)
-            if val > 0:
-                return val
-        except (TypeError, ValueError):
-            continue
+    """Use shared/throttled LTP cache so dashboard + engine do not double-hit Angel."""
+    from app.services.market_ltp import get_index_ltp_cached
+
+    ltp, _detail, ok = get_index_ltp_cached(ttl_sec=1.25)
+    if ok and ltp is not None and ltp > 0:
+        return float(ltp)
     return 0.0
 
 

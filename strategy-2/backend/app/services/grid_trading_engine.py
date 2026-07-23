@@ -815,7 +815,7 @@ async def _engine_loop() -> None:
         except Exception as exc:  # noqa: BLE001
             LOG.exception("[GridEngine] loop error: %s", exc)
         try:
-            await asyncio.wait_for(_STOP.wait(), timeout=0.2)
+            await asyncio.wait_for(_STOP.wait(), timeout=0.5)
         except asyncio.TimeoutError:
             pass
     LOG.info("[GridEngine] stopped")

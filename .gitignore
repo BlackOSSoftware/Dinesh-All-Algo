@@ -1,0 +1,2 @@
+# Cross-process Angel rate-limit / LTP cache (shared by strategy-1..4)
+.angel_shared/

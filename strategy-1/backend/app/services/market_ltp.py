@@ -81,6 +81,39 @@ def _fetch_live_payload() -> dict[str, Any]:
     return fetch_sensex_live_quote(exchange_tokens=exchange_tokens, mode=mode)
 
 
+def _try_shared_sensex(*, max_age_sec: float) -> dict[str, Any] | None:
+    from app.services.sensex_shared_ltp import load_shared_sensex_ltp
+
+    hit = load_shared_sensex_ltp(max_age_sec=max_age_sec)
+    if not hit:
+        return None
+    ltp, payload = hit
+    now = time.monotonic()
+    prev = _CACHE.get("ltp")
+    if prev is not None and float(prev) != float(ltp):
+        _CACHE["prev_ltp"] = float(prev)
+    _CACHE.update(
+        {
+            "t": now,
+            "live_t": now,
+            "ltp": float(ltp),
+            "detail": "shared cross-process LTP",
+            "ok": True,
+            "payload": payload,
+        }
+    )
+    LOG.debug("SENSEX LTP from shared cache=%.2f", ltp)
+    return payload
+
+
+def _save_shared_if_live(payload: dict[str, Any], ltp: float | None, ok: bool) -> None:
+    if not ok or ltp is None or ltp <= 0:
+        return
+    from app.services.sensex_shared_ltp import save_shared_sensex_ltp
+
+    save_shared_sensex_ltp(float(ltp), payload)
+
+
 def _store_payload(payload: dict[str, Any], *, now: float | None = None) -> tuple[float | None, str, bool]:
     """Update shared cache from a sensex_quote payload. ok=True only for live Angel LTP."""
     now = time.monotonic() if now is None else now
@@ -172,10 +205,31 @@ def get_engine_tick_ltp(
         _CACHE.update({"t": now, "ltp": None, "detail": "Angel not configured", "ok": False, "payload": None})
         return None, "Angel not configured", False, None, False
 
+    # Prefer sibling strategy's fresh quote before another Angel call.
+    shared_payload = _try_shared_sensex(max_age_sec=max(ttl_sec, 1.25))
+    if shared_payload is not None and _CACHE.get("ltp") is not None:
+        return (
+            float(_CACHE["ltp"]),
+            str(_CACHE["detail"] or ""),
+            True,
+            (_CACHE["prev_ltp"] if _CACHE.get("prev_ltp") is not None else None),
+            True,
+        )
+
     try:
         payload = _fetch_live_payload()
     except Exception as e:  # noqa: BLE001
         LOG.warning("market_ltp quote failed: %s", e)
+        # Fall back to slightly older shared stamp during rate-limit cooldown.
+        shared_payload = _try_shared_sensex(max_age_sec=_SOFT_LIVE_HOLD_SEC)
+        if shared_payload is not None and _CACHE.get("ltp") is not None:
+            return (
+                float(_CACHE["ltp"]),
+                str(_CACHE["detail"] or ""),
+                True,
+                (_CACHE["prev_ltp"] if _CACHE.get("prev_ltp") is not None else None),
+                True,
+            )
         live_age = now - float(_CACHE.get("live_t") or 0.0)
         if _CACHE.get("ltp") is not None and bool(_CACHE.get("ok")) and live_age <= _SOFT_LIVE_HOLD_SEC:
             _CACHE["t"] = now
@@ -191,6 +245,7 @@ def get_engine_tick_ltp(
         return None, str(e), False, None, False
 
     ltp, detail, ok = _store_payload(payload, now=now)
+    _save_shared_if_live(payload, ltp, ok)
     return ltp, detail, ok, (_CACHE["prev_ltp"] if _CACHE.get("prev_ltp") is not None else None), False
 
 
@@ -202,12 +257,16 @@ def get_dashboard_quote(*, force_refresh: bool = False) -> dict[str, Any]:
         cached = peek_shared_quote_payload(max_age_sec=1.25)
         if cached is not None:
             return cached
+        shared_payload = _try_shared_sensex(max_age_sec=1.25)
+        if shared_payload is not None:
+            return shared_payload
 
     if not (settings.angel_api_key or "").strip() or not (settings.angel_jwt_token or "").strip():
         raise RuntimeError("Angel One not configured: set ANGEL_API_KEY and ANGEL_JWT_TOKEN in backend/.env")
 
     payload = _fetch_live_payload()
-    _store_payload(payload)
+    ltp, _detail, ok = _store_payload(payload)
+    _save_shared_if_live(payload, ltp, ok)
     # Always return the full payload (including disk fallback) for UI honesty.
     return payload
 
